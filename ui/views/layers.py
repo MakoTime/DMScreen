@@ -26,7 +26,7 @@ class LayerModel(QAbstractTableModel):
         self._updating_manager = False
         self._moving_rows = False
         layer_manager.subscribe_to_updates(self.refresh)
-        layer_manager.subscribe_to_media_updates(self.refresh)
+        layer_manager.subscribe_to_media_updates(self.media_refresh)
 
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self.layer_manager.layers)
@@ -187,6 +187,16 @@ class LayerModel(QAbstractTableModel):
             index = self.index(current_row, self.NAME)
             table.setCurrentIndex(index)
             table.selectRow(current_row)
+
+    def media_refresh(self):
+        """Keep media changes out of the model reset path during playback/painting."""
+        if self._updating_manager or self.rowCount() == 0:
+            return
+        self.dataChanged.emit(
+            self.index(0, self.IMAGE),
+            self.index(self.rowCount() - 1, self.IMAGE),
+            [Qt.DecorationRole],
+        )
 
 
 class LayerTable(QTableView):

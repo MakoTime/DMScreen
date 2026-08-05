@@ -38,6 +38,11 @@ class RenderWorker(QObject):
         super().__init__(parent)
         self.frame_size = QSize(frame_size)
         self.background_color = QColor(background_color)
+        self.frame = Frame(
+            *self.frame_size.toTuple(),
+            output_scale=0.5,
+            background_color=self.background_color,
+        )
         self._lock = Lock()
         self._pending: tuple[int, list[RenderState]] | None = None
         self._scheduled = False
@@ -70,11 +75,9 @@ class RenderWorker(QObject):
             return
 
         request_id, states = pending
-        canvas = Frame(
-            *self.frame_size.toTuple(),
-            output_scale=0.5,
-            background_color=self.background_color,
-        ).render_states(states)
+        self.frame.set_size(*self.frame_size.toTuple())
+        self.frame.set_background_color(self.background_color)
+        canvas = self.frame.render_states(states)
         self.rendered.emit(request_id, canvas)
 
 
@@ -91,6 +94,7 @@ class Frame:
         self._size = QSize(max(0, width), max(0, height))
         self.output_scale = max(0.01, min(1.0, output_scale))
         self.background_color = QColor(background_color or "black")
+        self._inverse_masks = {}
 
     @property
     def size(self) -> QSize:
@@ -139,7 +143,6 @@ class Frame:
 
         painter = QPainter(canvas)
         painter.setClipRect(QRect(QPoint(0, 0), output_size))
-        inverse_masks = {}
         for state in drawable_states:
             image = state.image
             scale_x, scale_y = state.scale
@@ -185,13 +188,16 @@ class Frame:
                     image = self._mask_image(
                         image,
                         state.mask_image,
-                        state.offset,
-                        (scale_x, scale_y),
-                        self._size,
-                        inverse_masks,
+                        QPoint(
+                            round(state.offset.x() * self.output_scale),
+                            round(state.offset.y() * self.output_scale),
+                        ),
+                        (scale_x * self.output_scale, scale_y * self.output_scale),
+                        output_size,
+                        self._inverse_masks,
                     )
-                    scale_x = self.output_scale
-                    scale_y = self.output_scale
+                    scale_x = 1.0
+                    scale_y = 1.0
                 else:
                     scale_x *= self.output_scale
                     scale_y *= self.output_scale
@@ -229,19 +235,22 @@ class Frame:
     ) -> RenderState | None:
         if layer.media is None or layer.media.is_empty():
             return None
+        image = QImage(layer.media.current_frame())
         mask_image = None
         mask_array = None
+        image_array = None
         if mask_layers is not None and layer.mask_layer_id is not None:
             mask_layer = mask_layers.get(layer.mask_layer_id)
             if mask_layer is not None and isinstance(mask_layer.media, MaskMedia):
                 mask_image = QImage(mask_layer.media.current_frame())
         return RenderState(
-            image=QImage(layer.media.current_frame()),
+            image=image,
             offset=QPoint(layer.offset),
             scale=tuple(layer.scale),
             alpha=layer.alpha,
             render_scale=layer.media.render_scale,
             mask_image=mask_image,
+            image_array=image_array,
             mask_array=mask_array,
         )
 
@@ -267,6 +276,8 @@ class Frame:
         cache_key = (mask_image.cacheKey(), output_size.width(), output_size.height())
         inverse_frame_mask = inverse_masks.get(cache_key)
         if inverse_frame_mask is None:
+            if len(inverse_masks) >= 8:
+                inverse_masks.clear()
             inverse_frame_mask = self._inverse_mask(mask_image, output_size)
             inverse_masks[cache_key] = inverse_frame_mask
 
