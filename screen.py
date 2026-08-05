@@ -143,17 +143,26 @@ class Frame:
         for state in drawable_states:
             image = state.image
             scale_x, scale_y = state.scale
+            image_array = state.image_array
+            mask_array = state.mask_array
+            if (
+                image_array is None
+                and state.mask_image is not None
+                and state.mask_image.size() == image.size()
+            ):
+                image_array = self._rgba_pixels(image)
+                mask_array = self._rgba_pixels(state.mask_image)[:, :, 3] > 0
             fast_mask = (
-                state.image_array is not None
-                and state.mask_array is not None
-                and state.image_array.shape[:2] == state.mask_array.shape
+                image_array is not None
+                and mask_array is not None
+                and image_array.shape[:2] == mask_array.shape
                 and scale_x == 1.0
                 and scale_y == 1.0
                 and state.offset.isNull()
             )
             if fast_mask:
-                pixels = state.image_array.copy()
-                pixels[state.mask_array, 3] = 0
+                pixels = image_array.copy()
+                pixels[mask_array, 3] = 0
                 image = QImage(
                     pixels.data,
                     pixels.shape[1],
@@ -203,6 +212,17 @@ class Frame:
         return canvas
 
     @staticmethod
+    def _rgba_pixels(image: QImage) -> np.ndarray:
+        rgba_image = image.convertToFormat(QImage.Format.Format_RGBA8888)
+        return np.frombuffer(
+            rgba_image.constBits(),
+            dtype=np.uint8,
+            count=rgba_image.bytesPerLine() * rgba_image.height(),
+        ).copy().reshape(
+            (rgba_image.height(), rgba_image.bytesPerLine() // 4, 4)
+        )[:, : rgba_image.width()]
+
+    @staticmethod
     def _state_from_layer(
         layer: Layer,
         mask_layers: dict[str, Layer] | None = None,
@@ -215,8 +235,6 @@ class Frame:
             mask_layer = mask_layers.get(layer.mask_layer_id)
             if mask_layer is not None and isinstance(mask_layer.media, MaskMedia):
                 mask_image = QImage(mask_layer.media.current_frame())
-                mask_array = mask_layer.media.frame_array()
-        image_array = layer.media.frame_array()
         return RenderState(
             image=QImage(layer.media.current_frame()),
             offset=QPoint(layer.offset),
@@ -224,7 +242,6 @@ class Frame:
             alpha=layer.alpha,
             render_scale=layer.media.render_scale,
             mask_image=mask_image,
-            image_array=image_array,
             mask_array=mask_array,
         )
 
