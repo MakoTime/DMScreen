@@ -27,10 +27,14 @@ class AnimationMedia(LayerMedia):
         self._timer.setInterval(33)
         self._timer.timeout.connect(self._advance)
         self._render()
+        self._thumbnail_image = QImage(self._image)
         self._timer.start()
 
     def frame_at(self, time_ms: int = 0) -> QImage:
         return self._image
+
+    def thumbnail_frame(self) -> QImage:
+        return self._thumbnail_image
 
     def copy(self) -> "AnimationMedia":
         copied = AnimationMedia(self.width, self.height)

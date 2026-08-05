@@ -56,7 +56,12 @@ class LayerModel(QAbstractTableModel):
             return layer.name
         if index.column() == self.IMAGE and role == Qt.DecorationRole:
             if layer.media is not None and not layer.media.is_empty():
-                image = layer.media.current_frame()
+                thumbnail_frame = getattr(layer.media, "thumbnail_frame", None)
+                image = (
+                    thumbnail_frame()
+                    if thumbnail_frame is not None
+                    else layer.media.current_frame()
+                )
                 return QPixmap.fromImage(image).scaled(
                     80,
                     80,

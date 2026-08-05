@@ -43,6 +43,11 @@ class TestAnimationMedia(unittest.TestCase):
         self.assertFalse(self.media.current_frame().isNull())
         self.assertEqual(self.media.frame_array().shape, (20, 32, 4))
 
+    def test_thumbnail_stays_at_initial_frame(self):
+        initial = self.media.thumbnail_frame()
+        self.media._advance()
+        self.assertEqual(self.media.thumbnail_frame(), initial)
+
     def test_direction_is_normalized(self):
         self.media.direction = (3.0, 4.0)
         self.media.normalize_direction()
