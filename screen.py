@@ -1,5 +1,5 @@
-from dataclasses import dataclass
 from threading import Lock
+from time import perf_counter
 
 import numpy as np
 
@@ -9,76 +9,142 @@ from PySide6.QtWidgets import (
     QLabel,
     QSizePolicy,
 )
-from PySide6.QtCore import QObject, QPoint, QRect, QSize, QThread, Qt, Signal, Slot
+from PySide6.QtCore import QObject, QPoint, QRect, QSize, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap, QPen
 from layer_manager import Layer, LayerManager
-from layer_media import MaskMedia
+from layer_media import AnimationMedia, MaskMedia
 from mouse_action import MouseActionMenu, MouseActionState
+from performance import PerformanceChecker
+from render_models import RenderState
+from media.gpu_composition import GpuCompositionRenderer
 
 
-@dataclass
-class RenderState:
-    image: QImage
-    offset: QPoint
-    scale: tuple[float, float]
-    alpha: float
-    render_scale: float
-    mask_image: QImage | None = None
-    image_array: np.ndarray | None = None
-    mask_array: np.ndarray | None = None
-
-
-class RenderWorker(QObject):
-    """Latest-frame renderer that keeps image processing off the GUI thread."""
+class RenderEngine(QObject):
+    """Latest-frame render coordinator and background render executor."""
 
     work_requested = Signal()
     rendered = Signal(int, QImage)
 
-    def __init__(self, frame_size: QSize, background_color=QColor("black"), parent=None):
+    def __init__(
+        self,
+        frame_size: QSize,
+        background_color=QColor("black"),
+        performance: PerformanceChecker | None = None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.frame_size = QSize(frame_size)
         self.background_color = QColor(background_color)
+        self.performance = performance or PerformanceChecker()
         self.frame = Frame(
             *self.frame_size.toTuple(),
             output_scale=0.5,
             background_color=self.background_color,
+            performance=self.performance,
         )
         self._lock = Lock()
-        self._pending: tuple[int, list[RenderState]] | None = None
+        self._pending: dict[str, RenderState] = {}
+        self._pending_request_id = 0
+        self._has_pending = False
+        self._latest: tuple[int, QImage] | None = None
+        self._generation = 0
         self._scheduled = False
+        self._processing = False
         self._stopped = False
+        self._gpu_compositor = GpuCompositionRenderer()
         self.work_requested.connect(self.process)
 
     def submit(self, request_id: int, states: list[RenderState]):
+        """Replace each layer task and remove tasks for deleted layers."""
+        tasks = {
+            state.layer_id or f"index:{index}": state
+            for index, state in enumerate(states)
+        }
         with self._lock:
             if self._stopped:
                 return
-            self._pending = (request_id, states)
-            if self._scheduled:
+            self._pending = tasks
+            self._pending_request_id = request_id
+            self._has_pending = True
+            self._generation += 1
+            self._latest = None
+            if self._scheduled or self._processing:
                 return
             self._scheduled = True
         self.work_requested.emit()
 
+    def cancel_layer(self, layer_id: str):
+        """Remove a layer task before it can be included in a render."""
+        with self._lock:
+            self._pending.pop(layer_id, None)
+            self._generation += 1
+
+    def result(self) -> tuple[int, QImage] | None:
+        """Return the most recently completed render result, if available."""
+        with self._lock:
+            if self._latest is None:
+                return None
+            request_id, canvas = self._latest
+            return request_id, QImage(canvas)
+
     def stop(self):
         with self._lock:
             self._stopped = True
-            self._pending = None
+            self._pending.clear()
+            self._has_pending = False
+            self._generation += 1
 
     @Slot()
     def process(self):
         with self._lock:
-            pending = self._pending
-            self._pending = None
+            states = list(self._pending.values())
+            request_id = self._pending_request_id
+            generation = self._generation
+            self._pending.clear()
+            has_pending = self._has_pending
+            self._has_pending = False
             self._scheduled = False
+            if has_pending:
+                self._processing = True
             stopped = self._stopped
-        if stopped or pending is None:
+        if stopped or not has_pending:
             return
 
-        request_id, states = pending
         self.frame.set_size(*self.frame_size.toTuple())
         self.frame.set_background_color(self.background_color)
-        canvas = self.frame.render_states(states)
-        self.rendered.emit(request_id, canvas)
+        with self.performance.measure("worker.render_frame"):
+            canvas = None
+            if all(state.mask_image is None for state in states):
+                if not self._gpu_compositor.available:
+                    self._gpu_compositor.initialize()
+                if self._gpu_compositor.available:
+                    output_size = QSize(
+                        max(1, round(self.frame_size.width() * self.frame.output_scale)),
+                        max(1, round(self.frame_size.height() * self.frame.output_scale)),
+                    )
+                    canvas = self._gpu_compositor.render(
+                        states,
+                        output_size,
+                        self.background_color,
+                        self.frame.output_scale,
+                    )
+            if canvas is None:
+                canvas = self.frame.render_states(states)
+        with self._lock:
+            is_current = not self._stopped and generation == self._generation
+            if is_current:
+                self._latest = (request_id, QImage(canvas))
+            self._processing = False
+            schedule_follow_up = bool(self._has_pending) and not self._scheduled
+            if schedule_follow_up:
+                self._scheduled = True
+        if is_current:
+            self.rendered.emit(request_id, canvas)
+        if schedule_follow_up:
+            self.work_requested.emit()
+
+
+RenderWorker = RenderEngine
 
 
 class Frame:
@@ -90,11 +156,14 @@ class Frame:
         height: int = 0,
         output_scale: float = 1.0,
         background_color: QColor | None = None,
+        performance: PerformanceChecker | None = None,
     ):
         self._size = QSize(max(0, width), max(0, height))
         self.output_scale = max(0.01, min(1.0, output_scale))
         self.background_color = QColor(background_color or "black")
+        self.performance = performance or PerformanceChecker()
         self._inverse_masks = {}
+        self.layer_timings: dict[str, float] = {}
 
     @property
     def size(self) -> QSize:
@@ -119,7 +188,7 @@ class Frame:
         }
         states = [
             self._state_from_layer(layer, mask_layers)
-            for layer in layers
+            for layer in reversed(layers)
         ]
         states = [state for state in states if state is not None]
         return self.render_states(states)
@@ -143,7 +212,9 @@ class Frame:
 
         painter = QPainter(canvas)
         painter.setClipRect(QRect(QPoint(0, 0), output_size))
+        self.layer_timings = {}
         for state in drawable_states:
+            started = perf_counter()
             image = state.image
             scale_x, scale_y = state.scale
             image_array = state.image_array
@@ -214,6 +285,12 @@ class Frame:
                 QRect(offset, scaled_size),
                 image,
             )
+            layer_name = state.layer_name or "Unnamed layer"
+            duration_ms = (perf_counter() - started) * 1000.0
+            self.layer_timings[layer_name] = (
+                self.layer_timings.get(layer_name, 0.0) + duration_ms
+            )
+            self.performance.record(f"worker.layer.{layer_name}", duration_ms)
         painter.end()
         return canvas
 
@@ -252,6 +329,13 @@ class Frame:
             mask_image=mask_image,
             image_array=image_array,
             mask_array=mask_array,
+            layer_name=layer.name,
+            layer_id=layer.layer_id,
+            animation=(
+                layer.media.gpu_render_data()
+                if isinstance(layer.media, AnimationMedia)
+                else None
+            ),
         )
 
     def _mask_image(
@@ -360,8 +444,9 @@ class AspectRatioLabel(QLabel):
     wheel_zoom_delta = Signal(float)
     mask_stroke = Signal(object)
     mask_stroke_finished = Signal()
+    ping_requested = Signal(object)
 
-    def __init__(self, parent=None):
+    def __init__(self, performance=None, parent=None):
         super().__init__(parent)
         self._source_pixmap = QPixmap()
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -380,20 +465,34 @@ class AspectRatioLabel(QLabel):
         self._mask_brush_size = 20
         self._mask_frame_size = QSize()
         self._mask_cursor_pos = None
+        self._ping_position = None
+        self._ping_started = None
+        self._ping_duration = 0.8
+        self._ping_timer = QTimer(self)
+        self._ping_timer.setInterval(16)
+        self._ping_timer.timeout.connect(self._advance_ping)
+        self.last_pixmap_update_ms = 0.0
+        self.performance = performance or PerformanceChecker()
         self.setMouseTracking(True)
 
     def set_source_pixmap(self, pixmap: QPixmap):
-        self._source_pixmap = pixmap
-        self._update_pixmap()
+        with self.performance.measure("ui.display.set_source_pixmap"):
+            started = perf_counter()
+            self._source_pixmap = pixmap
+            self._update_pixmap()
+            self.last_pixmap_update_ms = (perf_counter() - started) * 1000.0
 
     def set_zoom(self, zoom: float):
-        self.zoom = max(0.1, min(4.0, float(zoom)))
-        self._update_pixmap()
+        with self.performance.measure("ui.display.set_zoom"):
+            self.zoom = max(0.1, min(4.0, float(zoom)))
+            self._update_pixmap()
 
     def set_mouse_action_state(self, state):
         self.mouse_action_state = state
         if state in (MouseActionState.PAN, MouseActionState.PLAYER_PAN):
             self.setCursor(Qt.CursorShape.OpenHandCursor)
+        elif state is MouseActionState.PING:
+            self.setCursor(Qt.CursorShape.CrossCursor)
         elif state in (
             MouseActionState.MASK,
             MouseActionState.MASK_FILL_ADD,
@@ -469,6 +568,13 @@ class AspectRatioLabel(QLabel):
 
     def mousePressEvent(self, event):
         self._mask_cursor_pos = event.position().toPoint()
+        if (
+            self.mouse_action_state is MouseActionState.PING
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            self.ping_requested.emit(event.position().toPoint())
+            event.accept()
+            return
         if (
             self.mouse_action_state
             in (
@@ -584,10 +690,27 @@ class AspectRatioLabel(QLabel):
         self.highlight_rect = rect
         self.update()
 
+    def set_ping_position(self, position):
+        self._ping_position = (float(position[0]), float(position[1]))
+        self._ping_started = perf_counter()
+        self._ping_timer.start()
+        self.update()
+
+    def _advance_ping(self):
+        if (
+            self._ping_started is None
+            or perf_counter() - self._ping_started >= self._ping_duration
+        ):
+            self._ping_started = None
+            self._ping_position = None
+            self._ping_timer.stop()
+        self.update()
+
     def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._update_pixmap()
-        self.viewport_changed.emit()
+        with self.performance.measure("ui.display.resize"):
+            super().resizeEvent(event)
+            self._update_pixmap()
+            self.viewport_changed.emit()
 
     def _update_pixmap(self):
         if self._source_pixmap.isNull():
@@ -619,10 +742,12 @@ class AspectRatioLabel(QLabel):
         pixmap_rect = self._display_rect()
         painter = QPainter(self)
         painter.drawPixmap(pixmap_rect, pixmap)
+        self._draw_ping(painter, pixmap_rect)
         if self.highlight_rect is None:
             self._draw_mask_brush(painter, pixmap_rect)
             painter.end()
             return
+
         highlight = self.highlight_rect
         x = pixmap_rect.left() + round(pixmap_rect.width() * highlight[0])
         y = pixmap_rect.top() + round(pixmap_rect.height() * highlight[1])
@@ -632,6 +757,34 @@ class AspectRatioLabel(QLabel):
         painter.drawRect(x, y, width, height)
         self._draw_mask_brush(painter, pixmap_rect)
         painter.end()
+
+    def _draw_ping(self, painter, display_rect):
+        if self._ping_position is None or self._ping_started is None:
+            return
+        progress = min(
+            1.0,
+            max(0.0, (perf_counter() - self._ping_started) / self._ping_duration),
+        )
+        center = QPoint(
+            display_rect.left() + round(display_rect.width() * self._ping_position[0]),
+            display_rect.top() + round(display_rect.height() * self._ping_position[1]),
+        )
+        base_radius = max(
+            8, round(min(display_rect.width(), display_rect.height()) * 0.035)
+        )
+        spread = max(
+            10, round(min(display_rect.width(), display_rect.height()) * 0.12)
+        )
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for offset, alpha in ((0.0, 220), (0.28, 140)):
+            wave_progress = min(1.0, max(0.0, progress - offset))
+            radius = base_radius + round(spread * wave_progress)
+            color = QColor("#ffd166")
+            color.setAlpha(round(alpha * (1.0 - wave_progress)))
+            painter.setPen(
+                QPen(color, max(2, round(3 * (1.0 - wave_progress))))
+            )
+            painter.drawEllipse(center, radius, radius)
 
     def _draw_mask_brush(self, painter, display_rect):
         if (
@@ -662,6 +815,7 @@ class AspectRatioLabel(QLabel):
 
 class Screen(QWidget):
     visibility_attribute = "visible"
+    render_thread_priority = QThread.Priority.NormalPriority
     frame_changed = Signal()
     zoom_changed = Signal(float)
 
@@ -675,19 +829,24 @@ class Screen(QWidget):
 
         self.layout = QVBoxLayout(self)
         self.layer_manager = layer_manager
+        self.performance = PerformanceChecker()
         self.frame = Frame(1920, 1080)  # Default size, can be changed later
         self._render_request_id = 0
+        self._last_render_signature = None
         self._render_thread = QThread(self)
-        self._render_worker = RenderWorker(
+        self._render_engine = RenderEngine(
             self.frame.size,
             self.frame.background_color,
+            performance=self.performance,
         )
-        self._render_worker.moveToThread(self._render_thread)
-        self._render_worker.rendered.connect(self._set_rendered_canvas)
+        self._render_engine.moveToThread(self._render_thread)
+        self._render_engine.rendered.connect(self._set_rendered_canvas)
+        self._render_thread.finished.connect(self._render_engine.deleteLater)
         self._render_thread.start()
+        self._render_thread.setPriority(self.render_thread_priority)
 
         # Shared display area
-        self.display_widget = AspectRatioLabel()
+        self.display_widget = AspectRatioLabel(self.performance)
         self.layout.addWidget(self.display_widget)
         self.mouse_action_menu = None
         if show_mouse_action_menu:
@@ -706,7 +865,8 @@ class Screen(QWidget):
         self.draw()
 
     def set_zoom(self, zoom: float):
-        self.display_widget.set_zoom(zoom)
+        with self.performance.measure("ui.screen.set_zoom"):
+            self.display_widget.set_zoom(zoom)
         self.zoom_changed.emit(self.display_widget.zoom)
 
     def build_ui(self):
@@ -714,6 +874,25 @@ class Screen(QWidget):
 
     def draw(self):
         """Draw visible layers from the bottom layer to the top layer."""
+        signature = tuple(
+            (
+                id(layer),
+                getattr(layer, self.visibility_attribute),
+                layer.offset.x(),
+                layer.offset.y(),
+                layer.scale,
+                layer.alpha,
+                layer.mask_layer_id,
+                id(layer.media),
+                layer.media.current_frame().cacheKey()
+                if layer.media is not None
+                else None,
+            )
+            for layer in self.layer_manager.layers
+        )
+        if signature == self._last_render_signature:
+            return
+        self._last_render_signature = signature
         mask_layers = {
             layer.layer_id: layer
             for layer in self.layer_manager.layers
@@ -721,17 +900,18 @@ class Screen(QWidget):
         }
         states = [
             self.frame._state_from_layer(layer, mask_layers)
-            for layer in self.layer_manager.layers
+            for layer in reversed(self.layer_manager.layers)
             if getattr(layer, self.visibility_attribute)
         ]
         states = [state for state in states if state is not None]
         self._render_request_id += 1
-        self._render_worker.submit(self._render_request_id, states)
+        self._render_engine.submit(self._render_request_id, states)
 
     def sync_frame_settings(self):
         """Apply the current frame settings to the background renderer."""
-        self._render_worker.frame_size = self.frame.size
-        self._render_worker.background_color = QColor(self.frame.background_color)
+        self._render_engine.frame_size = self.frame.size
+        self._render_engine.background_color = QColor(self.frame.background_color)
+        self._last_render_signature = None
         self.draw()
         self.frame_changed.emit()
 
@@ -742,26 +922,29 @@ class Screen(QWidget):
             source_frame.size.height(),
         )
         self.frame.set_background_color(source_frame.background_color)
-        self._render_worker.frame_size = self.frame.size
-        self._render_worker.background_color = QColor(
+        self._render_engine.frame_size = self.frame.size
+        self._render_engine.background_color = QColor(
             self.frame.background_color
         )
+        self._last_render_signature = None
         self.draw()
 
     @Slot(int, QImage)
     def _set_rendered_canvas(self, request_id: int, canvas: QImage):
-        if request_id != self._render_request_id:
-            return
-        if canvas.isNull():
-            self.display_widget.set_source_pixmap(QPixmap())
-            return
+        with self.performance.measure("ui.screen.receive_render"):
+            if request_id != self._render_request_id:
+                return
+            if canvas.isNull():
+                self.display_widget.set_source_pixmap(QPixmap())
+                return
 
-        self.display_widget.set_source_pixmap(QPixmap.fromImage(canvas))
+            self.display_widget.set_source_pixmap(QPixmap.fromImage(canvas))
 
     def closeEvent(self, event):
         self.layer_manager.unsubscribe_from_updates(self.draw)
         self.layer_manager.unsubscribe_from_media_updates(self.draw)
-        self._render_worker.stop()
+        self._render_engine.rendered.disconnect(self._set_rendered_canvas)
+        self._render_engine.stop()
         self._render_thread.quit()
         self._render_thread.wait()
         super().closeEvent(event)

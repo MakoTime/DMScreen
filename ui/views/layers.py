@@ -301,12 +301,12 @@ class LayerPanel(QWidget):
     def _add_animation_layer(self):
         layer_number = len(self.layer_manager.layers) + 1
         layer = Layer(f"Animation {layer_number}")
+        frame_size = self.edit_factory.frame.size
         media = AnimationMedia(
-            min(160, max(16, self.edit_factory.frame.size.width() // 4)),
-            min(90, max(16, self.edit_factory.frame.size.height() // 4)),
+            max(16, frame_size.width()),
+            max(16, frame_size.height()),
         )
         layer.media = media
-        frame_size = self.edit_factory.frame.size
         if not frame_size.isEmpty():
             layer.scale = (
                 frame_size.width() / media.width,

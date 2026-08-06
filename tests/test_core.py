@@ -13,7 +13,72 @@ from layer_media import (
     LayerMedia,
     MaskMedia,
 )
-from screen import Frame, RenderState
+from screen import Frame, RenderEngine, RenderState
+from performance import PerformanceChecker
+
+
+class TestPerformanceChecker(unittest.TestCase):
+    def test_measure_collects_named_statistics(self):
+        checker = PerformanceChecker()
+        with checker.measure("worker.test"):
+            pass
+        record = checker.snapshot()[0]
+        self.assertEqual(record.name, "worker.test")
+        self.assertEqual(record.calls, 1)
+        self.assertGreaterEqual(record.last_ms, 0.0)
+
+    def test_wrap_records_function_calls(self):
+        checker = PerformanceChecker()
+        add = checker.wrap("ui.add", lambda left, right: left + right)
+        self.assertEqual(add(2, 3), 5)
+        self.assertEqual(checker.snapshot()[0].calls, 1)
+
+
+class TestRenderEngine(unittest.TestCase):
+    def test_result_returns_latest_completed_task(self):
+        engine = RenderEngine(QSize(4, 4))
+        image = QImage(4, 4, QImage.Format.Format_ARGB32)
+        image.fill(QColor("red"))
+        state = RenderState(image, QPoint(), (1.0, 1.0), 1.0, 1.0)
+
+        self.assertIsNone(engine.result())
+        engine.submit(1, [state])
+        engine.process()
+        request_id, result = engine.result()
+
+        self.assertEqual(request_id, 1)
+        self.assertEqual(result.pixelColor(0, 0), QColor("red"))
+
+        image.fill(QColor("blue"))
+        engine.submit(2, [RenderState(image, QPoint(), (1.0, 1.0), 1.0, 1.0)])
+        engine.process()
+        request_id, result = engine.result()
+
+        self.assertEqual(request_id, 2)
+        self.assertEqual(result.pixelColor(0, 0), QColor("blue"))
+
+    def test_coalesces_layers_and_clears_deleted_layer_tasks(self):
+        engine = RenderEngine(QSize(4, 4))
+        red = QImage(4, 4, QImage.Format.Format_ARGB32)
+        red.fill(QColor("red"))
+        blue = QImage(4, 4, QImage.Format.Format_ARGB32)
+        blue.fill(QColor("blue"))
+
+        engine.submit(
+            1,
+            [
+                RenderState(red, QPoint(), (1.0, 1.0), 1.0, 1.0, layer_id="layer"),
+                RenderState(blue, QPoint(), (1.0, 1.0), 1.0, 1.0, layer_id="layer"),
+            ],
+        )
+        request_id, result = engine.result()
+        self.assertEqual(request_id, 1)
+        self.assertEqual(result.pixelColor(0, 0), QColor("blue"))
+
+        engine.submit(2, [])
+        request_id, result = engine.result()
+        self.assertEqual(request_id, 2)
+        self.assertEqual(result.pixelColor(0, 0), QColor("black"))
 
 
 class TestImageMedia(unittest.TestCase):
@@ -72,6 +137,12 @@ class TestAnimationMedia(unittest.TestCase):
         finally:
             copied.stop()
 
+    def test_performance_records_animation_work(self):
+        self.media._advance()
+        names = {record.name for record in self.media.performance.snapshot()}
+        self.assertIn("media.animation.advance", names)
+        self.assertIn("media.animation.render", names)
+
 
 class TestGridMedia(unittest.TestCase):
     def test_square_spacing_is_enforced(self):
@@ -92,6 +163,18 @@ class TestDrawAndMaskMedia(unittest.TestCase):
         try:
             self.assertEqual(media.size, QSize(160, 100))
             self.assertEqual(media.current_frame().pixelColor(0, 0).alpha(), 0)
+        finally:
+            media.stop()
+
+    def test_draw_media_can_paint_and_erase_with_brush(self):
+        media = DrawMedia(40, 40)
+        try:
+            media.paint_at(20, 20, 5)
+            self.assertEqual(media.current_frame().pixelColor(20, 20).name(), "#ffffff")
+            media.paint_line(5, 20, 35, 20, 5)
+            self.assertEqual(media.current_frame().pixelColor(10, 20).name(), "#ffffff")
+            media.paint_at(20, 20, 5, erase=True)
+            self.assertEqual(media.current_frame().pixelColor(20, 20).alpha(), 0)
         finally:
             media.stop()
 
@@ -210,6 +293,24 @@ class TestLayerManager(unittest.TestCase):
 
 
 class TestFrame(unittest.TestCase):
+    def test_render_records_layer_timings(self):
+        image = QImage(4, 4, QImage.Format.Format_ARGB32)
+        image.fill(QColor("red"))
+        frame = Frame(4, 4)
+        frame.draw([Layer("Measured", image)])
+        self.assertIn("Measured", frame.layer_timings)
+        self.assertGreaterEqual(frame.layer_timings["Measured"], 0.0)
+
+    def test_first_layer_is_rendered_on_top(self):
+        top = QImage(4, 4, QImage.Format.Format_ARGB32)
+        top.fill(QColor("red"))
+        bottom = QImage(4, 4, QImage.Format.Format_ARGB32)
+        bottom.fill(QColor("blue"))
+        rendered = Frame(4, 4).draw(
+            [Layer("Top", top), Layer("Bottom", bottom)]
+        )
+        self.assertEqual(rendered.pixelColor(1, 1), QColor("red"))
+
     def test_layer_mask_reveals_image_through_transparent_mask_area(self):
         image = QImage(4, 4, QImage.Format.Format_ARGB32)
         image.fill(QColor("red"))

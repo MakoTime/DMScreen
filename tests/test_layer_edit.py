@@ -43,6 +43,7 @@ class TestLayerEdit(unittest.TestCase):
             QApplication.processEvents()
             dialog.model.create_animation()
             QApplication.processEvents()
+            self.assertEqual(dialog.model.layer.media.size, QSize(160, 100))
             self.assertFalse(dialog.import_button.isVisible())
             self.assertTrue(dialog.animation_mode.isVisible())
             self.assertFalse(dialog.grid_spacing_x.isVisible())

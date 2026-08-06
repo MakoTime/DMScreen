@@ -1,8 +1,10 @@
+from PySide6.QtCore import QThread
 from PySide6.QtWidgets import QLabel
 from screen import Screen
 
 class PlayerScreen(Screen):
     visibility_attribute = "player_visible"
+    render_thread_priority = QThread.Priority.HighPriority
 
     def __init__(self, layer_manager, parent=None):
         super().__init__(

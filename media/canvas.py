@@ -23,7 +23,8 @@ class ImageMedia(LayerMedia):
 
 
 class DrawMedia(ImageMedia):
-    def __init__(self, width: int, height: int, parent=None):
+    def __init__(self, width: int, height: int, brush_size=20, parent=None):
+        self.brush_size = max(1, int(brush_size))
         image = QImage(
             max(1, int(width)),
             max(1, int(height)),
@@ -33,9 +34,44 @@ class DrawMedia(ImageMedia):
         super().__init__(image, parent)
 
     def copy(self) -> "DrawMedia":
-        copied = DrawMedia(self._image.width(), self._image.height())
+        copied = DrawMedia(
+            self._image.width(), self._image.height(), self.brush_size
+        )
         copied._image = QImage(self._image)
         return copied
+
+    def _paint(self, brush_size, erase):
+        painter = QPainter(self._image)
+        if erase:
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+        painter.setPen(QPen(
+            QColor("white"),
+            max(1, int(brush_size or self.brush_size)),
+            Qt.PenStyle.SolidLine,
+            Qt.PenCapStyle.RoundCap,
+            Qt.PenJoinStyle.RoundJoin,
+        ))
+        return painter
+
+    def paint_at(self, x: int, y: int, brush_size=None, erase=False):
+        painter = self._paint(brush_size, erase)
+        painter.drawPoint(int(x), int(y))
+        painter.end()
+        self.frame_changed.emit()
+
+    def paint_line(
+        self,
+        start_x,
+        start_y,
+        end_x,
+        end_y,
+        brush_size=None,
+        erase=False,
+    ):
+        painter = self._paint(brush_size, erase)
+        painter.drawLine(int(start_x), int(start_y), int(end_x), int(end_y))
+        painter.end()
+        self.frame_changed.emit()
 
 
 class MaskMedia(ImageMedia):

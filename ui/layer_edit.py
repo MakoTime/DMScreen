@@ -67,6 +67,7 @@ class LayerEditModel(QObject):
 		self._fit_media_when_ready = False
 		self._disposed = False
 		self._connect_media()
+		self.media_model = LayerMediaEditModel(self)
 
 	def _connect_media(self):
 		if self.layer.media is not None:
@@ -124,79 +125,28 @@ class LayerEditModel(QObject):
 		self.changed.emit()
 
 	def create_animation(self):
-		self._stop_media()
-		self.layer.media = AnimationMedia(
-			min(160, max(16, self.frame.size.width() // 4)),
-			min(90, max(16, self.frame.size.height() // 4)),
-		)
-		self._connect_media()
-		self._fit_media_to_frame()
-		self.changed.emit()
+		self.media_model.create_animation()
 
 	def create_grid(self):
-		self._stop_media()
-		self.layer.media = GridMedia(
-			max(16, self.frame.size.width()),
-			max(16, self.frame.size.height()),
-		)
-		self._connect_media()
-		self._fit_media_to_frame()
-		self.changed.emit()
+		self.media_model.create_grid()
 
 	def create_draw(self):
-		self._stop_media()
-		self.layer.media = DrawMedia(
-			self.frame.size.width(),
-			self.frame.size.height(),
-		)
-		self._connect_media()
-		self.changed.emit()
+		self.media_model.create_draw()
 
 	def create_mask(self):
-		self._stop_media()
-		self.layer.media = MaskMedia(
-			self.frame.size.width(),
-			self.frame.size.height(),
-		)
-		self.layer.alpha = 0.5
-		self.layer.mask_layer_id = None
-		self._connect_media()
-		self.changed.emit()
+		self.media_model.create_mask()
 
 	def set_mask_auto_fill(self, auto_fill: bool):
-		if not isinstance(self.layer.media, MaskMedia):
-			return
-		self.layer.media.set_auto_fill(auto_fill)
-		self.changed.emit()
+		self.media_model.set_mask_auto_fill(auto_fill)
 
 	def set_mask_brush_size(self, brush_size: int):
-		if not isinstance(self.layer.media, MaskMedia):
-			return
-		self.layer.media.brush_size = max(1, int(brush_size))
-		self.changed.emit()
+		self.media_model.set_mask_brush_size(brush_size)
 
 	def detect_grid(self, image: QImage) -> bool:
-		media = self.layer.media
-		if not isinstance(media, GridMedia):
-			return False
-		detected = media.detect_from_image(image)
-		if detected:
-			self._sync_grid_to_target()
-		return detected
+		return self.media_model.detect_grid(image)
 
 	def _sync_grid_to_target(self):
-		if not isinstance(self.layer.media, GridMedia):
-			return
-		if self.target is None or not isinstance(self.target.media, GridMedia):
-			return
-		self.target.media.set_parameters(
-			self.layer.media.spacing_x,
-			self.layer.media.spacing_y,
-			self.layer.media.offset_x,
-			self.layer.media.offset_y,
-			self.layer.media.line_width,
-			self.layer.media.color,
-		)
+		self.media_model.sync_grid_to_target()
 
 	def import_media(self, file_path: str) -> bool:
 		if not Path(file_path).is_file():
@@ -281,6 +231,195 @@ class LayerEditModel(QObject):
 		target.mask_layer_id = self.layer.mask_layer_id
 
 
+class AnimationEditModel:
+	"""Owns procedural animation editing state and operations."""
+
+	def __init__(self, media_model):
+		self.media_model = media_model
+
+	@property
+	def layer(self):
+		return self.media_model.layer
+
+	def create(self):
+		self.media_model.create_animation()
+
+	def set_parameters(self, mode, speed, noise_scale, direction):
+		media = self.layer.media
+		if not isinstance(media, AnimationMedia):
+			return
+		media.set_parameters(
+			media.color_a,
+			media.color_b,
+			mode,
+			speed,
+			noise_scale,
+			direction,
+		)
+
+	def set_color(self, channel, color):
+		media = self.layer.media
+		if not isinstance(media, AnimationMedia):
+			return
+		if channel == "a":
+			media.color_a = color
+		else:
+			media.color_b = color
+		media._render()
+		media.frame_changed.emit()
+
+
+class GridEditModel:
+	"""Owns grid editing state and operations."""
+
+	def __init__(self, media_model):
+		self.media_model = media_model
+
+	@property
+	def layer(self):
+		return self.media_model.layer
+
+	def create(self):
+		self.media_model.create_grid()
+
+	def set_parameters(self, spacing, offset, line_width):
+		media = self.layer.media
+		if not isinstance(media, GridMedia):
+			return
+		media.set_parameters(
+			spacing,
+			spacing,
+			offset[0],
+			offset[1],
+			line_width,
+			media.color,
+		)
+		self.media_model.sync_grid_to_target()
+
+	def detect(self, image):
+		return self.media_model.detect_grid(image)
+
+	def set_color(self, color):
+		media = self.layer.media
+		if not isinstance(media, GridMedia):
+			return
+		media.color = color
+		media._render()
+		media.frame_changed.emit()
+		self.media_model.sync_grid_to_target()
+
+
+class MaskEditModel:
+	"""Owns mask editing state and operations."""
+
+	def __init__(self, media_model):
+		self.media_model = media_model
+
+	@property
+	def layer(self):
+		return self.media_model.layer
+
+	def create(self):
+		self.media_model.create_mask()
+
+	def set_auto_fill(self, auto_fill):
+		self.media_model.set_mask_auto_fill(auto_fill)
+
+	def set_brush_size(self, brush_size):
+		self.media_model.set_mask_brush_size(brush_size)
+
+
+class LayerMediaEditModel:
+	"""Coordinates shared media lifecycle and specialized media models."""
+
+	def __init__(self, layer_model):
+		self.layer_model = layer_model
+		self.animation = AnimationEditModel(self)
+		self.grid = GridEditModel(self)
+		self.mask = MaskEditModel(self)
+
+	@property
+	def layer(self):
+		return self.layer_model.layer
+
+	@property
+	def frame(self):
+		return self.layer_model.frame
+
+	def _replace(self, media):
+		self.layer_model._stop_media()
+		self.layer.media = media
+		self.layer_model._connect_media()
+
+	def create_animation(self):
+		self._replace(
+			AnimationMedia(
+				max(16, self.frame.size.width()),
+				max(16, self.frame.size.height()),
+			)
+		)
+		self.layer_model._fit_media_to_frame()
+		self.layer_model.changed.emit()
+
+	def create_grid(self):
+		self._replace(
+			GridMedia(
+				max(16, self.frame.size.width()),
+				max(16, self.frame.size.height()),
+			)
+		)
+		self.layer_model._fit_media_to_frame()
+		self.layer_model.changed.emit()
+
+	def create_draw(self):
+		self._replace(
+			DrawMedia(self.frame.size.width(), self.frame.size.height())
+		)
+		self.layer_model.changed.emit()
+
+	def create_mask(self):
+		self._replace(
+			MaskMedia(self.frame.size.width(), self.frame.size.height())
+		)
+		self.layer.alpha = 0.5
+		self.layer.mask_layer_id = None
+		self.layer_model.changed.emit()
+
+	def set_mask_auto_fill(self, auto_fill):
+		if isinstance(self.layer.media, MaskMedia):
+			self.layer.media.set_auto_fill(auto_fill)
+			self.layer_model.changed.emit()
+
+	def set_mask_brush_size(self, brush_size):
+		if isinstance(self.layer.media, MaskMedia):
+			self.layer.media.brush_size = max(1, int(brush_size))
+			self.layer_model.changed.emit()
+
+	def detect_grid(self, image):
+		if not isinstance(self.layer.media, GridMedia):
+			return False
+		detected = self.layer.media.detect_from_image(image)
+		if detected:
+			self.sync_grid_to_target()
+		return detected
+
+	def sync_grid_to_target(self):
+		media = self.layer.media
+		target = self.layer_model.target
+		if not isinstance(media, GridMedia):
+			return
+		if target is None or not isinstance(target.media, GridMedia):
+			return
+		target.media.set_parameters(
+			media.spacing_x,
+			media.spacing_y,
+			media.offset_x,
+			media.offset_y,
+			media.line_width,
+			media.color,
+		)
+
+
 class ScenePreview(QWidget):
 	"""Paints the frame outline and the edited layer inside it."""
 
@@ -317,6 +456,234 @@ class ScenePreview(QWidget):
 			painter.end()
 
 
+class AnimationLayerView(QWidget):
+	"""Controls specific to procedural animation layers."""
+
+	def __init__(self, model, parent=None):
+		super().__init__(parent)
+		self.model = model.media_model.animation
+		self.create_button = QPushButton("Create Animation")
+		self.mode = QComboBox()
+		self.mode.addItems(("Color to color", "Color to alpha"))
+		self.direction_x = self._direction_spin()
+		self.direction_y = self._direction_spin()
+		self.color_a = QPushButton()
+		self.color_b = QPushButton()
+		self.speed = QDoubleSpinBox()
+		self.speed.setRange(0.0, 1.0)
+		self.speed.setSingleStep(0.01)
+		self.speed.setDecimals(2)
+		self.speed.setFixedWidth(96)
+		self.noise_scale = QDoubleSpinBox()
+		self.noise_scale.setRange(0.003, 0.08)
+		self.noise_scale.setSingleStep(0.003)
+		self.noise_scale.setDecimals(3)
+		self.noise_scale.setFixedWidth(96)
+
+		form = QFormLayout(self)
+		form.addRow(self.create_button)
+		form.addRow("Animation output", self.mode)
+		form.addRow("Animation direction X", self.direction_x)
+		form.addRow("Animation direction Y", self.direction_y)
+		form.addRow("Animation color A", self.color_a)
+		form.addRow("Animation color B", self.color_b)
+		form.addRow("Animation speed", self.speed)
+		form.addRow("Noise scale", self.noise_scale)
+		self._form = form
+		self.create_button.clicked.connect(self.model.create)
+		self.mode.currentIndexChanged.connect(self._changed)
+		self.direction_x.valueChanged.connect(self._changed)
+		self.direction_y.valueChanged.connect(self._changed)
+		self.color_a.clicked.connect(lambda: self._choose_color("a"))
+		self.color_b.clicked.connect(lambda: self._choose_color("b"))
+		self.speed.valueChanged.connect(self._changed)
+		self.noise_scale.valueChanged.connect(self._changed)
+
+	def set_color_b_visible(self, visible):
+		self._form.setRowVisible(self.color_b, visible)
+
+	def refresh(self, media):
+		is_animation = isinstance(media, AnimationMedia)
+		self.setVisible(is_animation)
+		if not is_animation:
+			return
+		self.mode.blockSignals(True)
+		self.mode.setCurrentIndex(1 if media.transparent_b else 0)
+		self.mode.blockSignals(False)
+		for spin, value in zip(
+			(self.direction_x, self.direction_y), media.direction
+		):
+			spin.blockSignals(True)
+			spin.setValue(value)
+			spin.blockSignals(False)
+		for spin, value in (
+			(self.speed, media.speed),
+			(self.noise_scale, media.noise_scale),
+		):
+			spin.blockSignals(True)
+			spin.setValue(value)
+			spin.blockSignals(False)
+		self._set_color_button(self.color_a, media.color_a)
+		self._set_color_button(self.color_b, media.color_b)
+		self.set_color_b_visible(self.mode.currentIndex() != 1)
+
+	def _changed(self):
+		self.model.set_parameters(
+			self.mode.currentIndex() == 1,
+			self.speed.value(),
+			self.noise_scale.value(),
+			(self.direction_x.value(), self.direction_y.value()),
+		)
+
+	def _choose_color(self, channel):
+		media = self.model.layer.media
+		if not isinstance(media, AnimationMedia):
+			return
+		current = media.color_a if channel == "a" else media.color_b
+		color = QColorDialog.getColor(current, self, "Choose animation color")
+		if not color.isValid():
+			return
+		self.model.set_color(channel, color)
+
+	@staticmethod
+	def _set_color_button(button, color):
+		button.setText(color.name())
+		button.setStyleSheet(
+			f"background-color: {color.name()}; color: {'white' if color.lightness() < 128 else 'black'}"
+		)
+
+	@staticmethod
+	def _direction_spin():
+		spin = QDoubleSpinBox()
+		spin.setRange(-100.0, 100.0)
+		spin.setSingleStep(0.1)
+		spin.setDecimals(3)
+		return spin
+
+
+class GridLayerView(QWidget):
+	"""Controls specific to grid layers."""
+
+	def __init__(self, model, reference_layers, parent=None):
+		super().__init__(parent)
+		self.model = model.media_model.grid
+		self.detect_button = QPushButton("Grid Detect")
+		self.reference = QComboBox()
+		self.spacing_x = self._grid_spin(2, 10000, 100)
+		self.spacing_y = self._grid_spin(2, 10000, 100)
+		self.offset_x = self._grid_spin(-10000, 10000, 0)
+		self.offset_y = self._grid_spin(-10000, 10000, 0)
+		self.line_width = self._grid_spin(1, 20, 2)
+		self.color = QPushButton()
+		for layer in reference_layers:
+			if layer.media is not None:
+				self.reference.addItem(layer.name, layer)
+
+		form = QFormLayout(self)
+		form.addRow(self.detect_button)
+		form.addRow("Grid reference layer", self.reference)
+		form.addRow("Grid spacing X", self.spacing_x)
+		form.addRow("Grid spacing Y (same as X)", self.spacing_y)
+		form.addRow("Grid offset X", self.offset_x)
+		form.addRow("Grid offset Y", self.offset_y)
+		form.addRow("Grid line width", self.line_width)
+		form.addRow("Grid color", self.color)
+		self.detect_button.clicked.connect(self._detect)
+		self.spacing_x.valueChanged.connect(self._changed)
+		self.spacing_y.valueChanged.connect(self._changed)
+		self.offset_x.valueChanged.connect(self._changed)
+		self.offset_y.valueChanged.connect(self._changed)
+		self.line_width.valueChanged.connect(self._changed)
+		self.color.clicked.connect(self._choose_color)
+
+	def refresh(self, media):
+		is_grid = isinstance(media, GridMedia)
+		self.setVisible(is_grid)
+		if not is_grid:
+			return
+		self.spacing_y.setEnabled(False)
+		for spin, value in (
+			(self.spacing_x, media.spacing_x),
+			(self.spacing_y, media.spacing_y),
+			(self.offset_x, media.offset_x),
+			(self.offset_y, media.offset_y),
+			(self.line_width, media.line_width),
+		):
+			spin.blockSignals(True)
+			spin.setValue(value)
+			spin.blockSignals(False)
+		self._set_color_button(media.color)
+
+	def _detect(self):
+		index = self.reference.currentIndex()
+		if index < 0:
+			return
+		layer = self.reference.itemData(index)
+		if layer is not None and layer.media is not None:
+			self.model.detect(layer.media.current_frame())
+
+	def _changed(self):
+		spacing = self.spacing_x.value()
+		self.spacing_y.blockSignals(True)
+		self.spacing_y.setValue(spacing)
+		self.spacing_y.blockSignals(False)
+		self.model.set_parameters(
+			spacing,
+			(self.offset_x.value(), self.offset_y.value()),
+			self.line_width.value(),
+		)
+
+	def _choose_color(self):
+		media = self.model.layer.media
+		if not isinstance(media, GridMedia):
+			return
+		color = QColorDialog.getColor(media.color, self, "Choose grid color")
+		if color.isValid():
+			self.model.set_color(color)
+
+	def _set_color_button(self, color):
+		self.color.setText(color.name())
+		self.color.setStyleSheet(
+			f"background-color: {color.name()}; color: {'white' if color.lightness() < 128 else 'black'}"
+		)
+
+	@staticmethod
+	def _grid_spin(minimum, maximum, value):
+		spin = QSpinBox()
+		spin.setRange(minimum, maximum)
+		spin.setValue(value)
+		return spin
+
+
+class MaskLayerView(QWidget):
+	"""Controls specific to mask layers."""
+
+	def __init__(self, model, parent=None):
+		super().__init__(parent)
+		self.model = model.media_model.mask
+		self.auto_fill = QCheckBox("Mask filled automatically")
+		self.brush_size = QSpinBox()
+		self.brush_size.setRange(1, 200)
+		self.brush_size.setValue(20)
+		form = QFormLayout(self)
+		form.addRow(self.auto_fill)
+		form.addRow("Mask brush size", self.brush_size)
+		self.auto_fill.toggled.connect(self.model.set_auto_fill)
+		self.brush_size.valueChanged.connect(self.model.set_brush_size)
+
+	def refresh(self, media):
+		is_mask = isinstance(media, MaskMedia)
+		self.setVisible(is_mask)
+		if not is_mask:
+			return
+		self.auto_fill.blockSignals(True)
+		self.auto_fill.setChecked(media.auto_fill)
+		self.auto_fill.blockSignals(False)
+		self.brush_size.blockSignals(True)
+		self.brush_size.setValue(media.brush_size)
+		self.brush_size.blockSignals(False)
+
+
 class LayerEditView(QDialog):
 	"""Dialog view for editing a layer and previewing it in the frame."""
 
@@ -349,34 +716,9 @@ class LayerEditView(QDialog):
 		for layer in model.reference_layers:
 			if isinstance(layer.media, MaskMedia):
 				self.mask_link.addItem(layer.name, layer.layer_id)
-		self.animation_button = QPushButton("Create Animation")
-		self.grid_detect_button = QPushButton("Grid Detect")
-		self.grid_reference = QComboBox()
-		for layer in model.reference_layers:
-			if layer.media is not None:
-				self.grid_reference.addItem(layer.name, layer)
-		self.animation_mode = QComboBox()
-		self.animation_mode.addItems(("Color to color", "Color to alpha"))
-		self.animation_direction_x = self._direction_spin()
-		self.animation_direction_y = self._direction_spin()
-		self.animation_color_a = QPushButton()
-		self.animation_color_b = QPushButton()
-		self.animation_speed = QDoubleSpinBox()
-		self.animation_speed.setRange(0.0, 1.0)
-		self.animation_speed.setSingleStep(0.01)
-		self.animation_speed.setDecimals(2)
-		self.animation_scale = QDoubleSpinBox()
-		self.animation_scale.setRange(0.003, 0.08)
-		self.animation_scale.setSingleStep(0.003)
-		self.animation_scale.setDecimals(3)
-		self.grid_spacing_x = self._grid_spin(2, 10000, 100)
-		self.grid_spacing_y = self._grid_spin(2, 10000, 100)
-		self.grid_offset_x = self._grid_spin(-10000, 10000, 0)
-		self.grid_offset_y = self._grid_spin(-10000, 10000, 0)
-		self.grid_line_width = self._grid_spin(1, 20, 2)
-		self.grid_color = QPushButton()
-		self.mask_auto_fill = QCheckBox("Mask filled automatically")
-		self.mask_brush_size = self._grid_spin(1, 200, 20)
+		self.animation_view = AnimationLayerView(model)
+		self.grid_view = GridLayerView(model, model.reference_layers)
+		self.mask_view = MaskLayerView(model)
 		self.preview = ScenePreview(model.frame)
 
 		form = QFormLayout()
@@ -396,39 +738,9 @@ class LayerEditView(QDialog):
 		form.addRow("Offset Y", self.offset_y_spin)
 		form.addRow("Alpha (%)", self.alpha_spin)
 		form.addRow("Mask link", self.mask_link)
-		form.addRow(self.mask_auto_fill)
-		self.mask_brush_size_label = QLabel("Mask brush size")
-		form.addRow(self.mask_brush_size_label, self.mask_brush_size)
-		form.addRow(self.animation_button)
-		self.animation_mode_label = QLabel("Animation output")
-		self.animation_direction_x_label = QLabel("Animation direction X")
-		self.animation_direction_y_label = QLabel("Animation direction Y")
-		self.animation_color_a_label = QLabel("Animation color A")
-		self.animation_color_b_label = QLabel("Animation color B")
-		self.animation_speed_label = QLabel("Animation speed")
-		self.animation_scale_label = QLabel("Noise scale")
-		self.grid_spacing_x_label = QLabel("Grid spacing X")
-		self.grid_spacing_y_label = QLabel("Grid spacing Y (same as X)")
-		self.grid_offset_x_label = QLabel("Grid offset X")
-		self.grid_offset_y_label = QLabel("Grid offset Y")
-		self.grid_line_width_label = QLabel("Grid line width")
-		self.grid_color_label = QLabel("Grid color")
-		self.grid_reference_label = QLabel("Grid reference layer")
-		form.addRow(self.animation_mode_label, self.animation_mode)
-		form.addRow(self.animation_direction_x_label, self.animation_direction_x)
-		form.addRow(self.animation_direction_y_label, self.animation_direction_y)
-		form.addRow(self.animation_color_a_label, self.animation_color_a)
-		form.addRow(self.animation_color_b_label, self.animation_color_b)
-		form.addRow(self.animation_speed_label, self.animation_speed)
-		form.addRow(self.animation_scale_label, self.animation_scale)
-		form.addRow(self.grid_detect_button)
-		form.addRow(self.grid_reference_label, self.grid_reference)
-		form.addRow(self.grid_spacing_x_label, self.grid_spacing_x)
-		form.addRow(self.grid_spacing_y_label, self.grid_spacing_y)
-		form.addRow(self.grid_offset_x_label, self.grid_offset_x)
-		form.addRow(self.grid_offset_y_label, self.grid_offset_y)
-		form.addRow(self.grid_line_width_label, self.grid_line_width)
-		form.addRow(self.grid_color_label, self.grid_color)
+		form.addRow(self.mask_view)
+		form.addRow(self.animation_view)
+		form.addRow(self.grid_view)
 
 		controls = QWidget()
 		controls.setLayout(form)
@@ -459,25 +771,80 @@ class LayerEditView(QDialog):
 		self.alpha_spin.valueChanged.connect(self._alpha_changed)
 		self.name_edit.textChanged.connect(self.model.set_name)
 		self.mask_link.currentIndexChanged.connect(self._mask_link_changed)
-		self.animation_button.clicked.connect(self.model.create_animation)
-		self.grid_detect_button.clicked.connect(self._grid_detect)
-		self.grid_spacing_x.valueChanged.connect(self._grid_changed)
-		self.grid_spacing_y.valueChanged.connect(self._grid_changed)
-		self.grid_offset_x.valueChanged.connect(self._grid_changed)
-		self.grid_offset_y.valueChanged.connect(self._grid_changed)
-		self.grid_line_width.valueChanged.connect(self._grid_changed)
-		self.grid_color.clicked.connect(self._choose_grid_color)
-		self.mask_auto_fill.toggled.connect(self._mask_auto_fill_changed)
-		self.mask_brush_size.valueChanged.connect(self._mask_brush_size_changed)
-		self.animation_mode.currentIndexChanged.connect(self._animation_changed)
-		self.animation_direction_x.valueChanged.connect(self._animation_changed)
-		self.animation_direction_y.valueChanged.connect(self._animation_changed)
-		self.animation_color_a.clicked.connect(lambda: self._choose_color("a"))
-		self.animation_color_b.clicked.connect(lambda: self._choose_color("b"))
-		self.animation_speed.valueChanged.connect(self._animation_changed)
-		self.animation_scale.valueChanged.connect(self._animation_changed)
 		self.model.changed.connect(self._refresh)
 		self._refresh()
+
+	@property
+	def animation_button(self):
+		return self.animation_view.create_button
+
+	@property
+	def animation_mode(self):
+		return self.animation_view.mode
+
+	@property
+	def animation_direction_x(self):
+		return self.animation_view.direction_x
+
+	@property
+	def animation_direction_y(self):
+		return self.animation_view.direction_y
+
+	@property
+	def animation_color_a(self):
+		return self.animation_view.color_a
+
+	@property
+	def animation_color_b(self):
+		return self.animation_view.color_b
+
+	@property
+	def animation_speed(self):
+		return self.animation_view.speed
+
+	@property
+	def animation_scale(self):
+		return self.animation_view.noise_scale
+
+	@property
+	def grid_reference(self):
+		return self.grid_view.reference
+
+	@property
+	def grid_detect_button(self):
+		return self.grid_view.detect_button
+
+	@property
+	def grid_spacing_x(self):
+		return self.grid_view.spacing_x
+
+	@property
+	def grid_spacing_y(self):
+		return self.grid_view.spacing_y
+
+	@property
+	def grid_offset_x(self):
+		return self.grid_view.offset_x
+
+	@property
+	def grid_offset_y(self):
+		return self.grid_view.offset_y
+
+	@property
+	def grid_line_width(self):
+		return self.grid_view.line_width
+
+	@property
+	def grid_color(self):
+		return self.grid_view.color
+
+	@property
+	def mask_auto_fill(self):
+		return self.mask_view.auto_fill
+
+	@property
+	def mask_brush_size(self):
+		return self.mask_view.brush_size
 
 	@staticmethod
 	def _scale_spin():
@@ -498,21 +865,6 @@ class LayerEditView(QDialog):
 		spin = QSpinBox()
 		spin.setRange(0, 100)
 		spin.setSuffix(" %")
-		return spin
-
-	@staticmethod
-	def _grid_spin(minimum, maximum, value):
-		spin = QSpinBox()
-		spin.setRange(minimum, maximum)
-		spin.setValue(value)
-		return spin
-
-	@staticmethod
-	def _direction_spin():
-		spin = QDoubleSpinBox()
-		spin.setRange(-100.0, 100.0)
-		spin.setSingleStep(0.1)
-		spin.setDecimals(3)
 		return spin
 
 	def _import_media(self):
@@ -543,12 +895,6 @@ class LayerEditView(QDialog):
 		):
 			self.model.create_mask()
 
-	def _mask_auto_fill_changed(self, enabled: bool):
-		self.model.set_mask_auto_fill(enabled)
-
-	def _mask_brush_size_changed(self):
-		self.model.set_mask_brush_size(self.mask_brush_size.value())
-
 	def _keep_aspect_changed(self, enabled: bool):
 		self.model.set_keep_aspect_ratio(enabled)
 		self.scale_y_spin.setEnabled(not enabled)
@@ -569,77 +915,8 @@ class LayerEditView(QDialog):
 	def _mask_link_changed(self):
 		self.model.set_mask_layer(self.mask_link.currentData())
 
-	def _choose_color(self, channel: str):
-		media = self.model.layer.media
-		if not isinstance(media, AnimationMedia):
-			return
-		current = media.color_a if channel == "a" else media.color_b
-		color = QColorDialog.getColor(current, self, "Choose animation color")
-		if not color.isValid():
-			return
-		if channel == "a":
-			media.color_a = color
-		else:
-			media.color_b = color
-		media._render()
-		media.frame_changed.emit()
-		self._refresh()
-
-	def _choose_grid_color(self):
-		media = self.model.layer.media
-		if not isinstance(media, GridMedia):
-			return
-		color = QColorDialog.getColor(media.color, self, "Choose grid color")
-		if color.isValid():
-			media.color = color
-			media._render()
-			media.frame_changed.emit()
-			self.model._sync_grid_to_target()
-			self._refresh()
-
-	def _grid_detect(self):
-		index = self.grid_reference.currentIndex()
-		if index < 0:
-			return
-		layer = self.grid_reference.itemData(index)
-		if layer is None or layer.media is None:
-			return
-		if self.model.detect_grid(layer.media.current_frame()):
-			self._refresh()
-
 	def _grid_changed(self):
-		media = self.model.layer.media
-		if not isinstance(media, GridMedia):
-			return
-		spacing = self.grid_spacing_x.value()
-		self.grid_spacing_y.blockSignals(True)
-		self.grid_spacing_y.setValue(spacing)
-		self.grid_spacing_y.blockSignals(False)
-		media.set_parameters(
-			spacing,
-			spacing,
-			self.grid_offset_x.value(),
-			self.grid_offset_y.value(),
-			self.grid_line_width.value(),
-			media.color,
-		)
-		self.model._sync_grid_to_target()
-
-	def _animation_changed(self):
-		media = self.model.layer.media
-		if not isinstance(media, AnimationMedia):
-			return
-		media.set_parameters(
-			media.color_a,
-			media.color_b,
-			self.animation_mode.currentIndex() == 1,
-			self.animation_speed.value(),
-			self.animation_scale.value(),
-			(
-				self.animation_direction_x.value(),
-				self.animation_direction_y.value(),
-			),
-		)
+		self.grid_view._changed()
 
 	def _refresh(self):
 		self.name_edit.blockSignals(True)
@@ -678,99 +955,10 @@ class LayerEditView(QDialog):
 		self.import_button.setVisible(not is_procedural)
 		self.fit_button.setVisible(not is_procedural)
 		self.fit_frame_button.setVisible(not is_procedural)
-		self.mask_auto_fill.setVisible(is_mask)
-		for widget in (
-			self.mask_brush_size_label,
-			self.mask_brush_size,
-		):
-			widget.setVisible(is_mask)
-		if is_mask:
-			self.mask_auto_fill.blockSignals(True)
-			self.mask_auto_fill.setChecked(media.auto_fill)
-			self.mask_auto_fill.blockSignals(False)
-			self.mask_brush_size.blockSignals(True)
-			self.mask_brush_size.setValue(media.brush_size)
-			self.mask_brush_size.blockSignals(False)
-		self.animation_button.setVisible(is_animation)
-		self.grid_detect_button.setVisible(is_grid)
-		self.grid_reference_label.setVisible(is_grid)
-		self.grid_reference.setVisible(is_grid)
-		is_color_to_alpha = is_animation and self.animation_mode.currentIndex() == 1
-		for widget in (
-			self.animation_mode_label,
-			self.animation_mode,
-			self.animation_direction_x_label,
-			self.animation_direction_x,
-			self.animation_direction_y_label,
-			self.animation_direction_y,
-			self.animation_color_a_label,
-			self.animation_color_a,
-			self.animation_color_b_label,
-			self.animation_color_b,
-			self.animation_speed_label,
-			self.animation_speed,
-			self.animation_scale_label,
-			self.animation_scale,
-		):
-			widget.setVisible(is_animation)
-		self.animation_color_b_label.setVisible(is_animation and not is_color_to_alpha)
-		self.animation_color_b.setVisible(is_animation and not is_color_to_alpha)
-		for widget in (
-			self.grid_spacing_x_label,
-			self.grid_spacing_x,
-			self.grid_spacing_y_label,
-			self.grid_spacing_y,
-			self.grid_offset_x_label,
-			self.grid_offset_x,
-			self.grid_offset_y_label,
-			self.grid_offset_y,
-			self.grid_line_width_label,
-			self.grid_line_width,
-			self.grid_color_label,
-			self.grid_color,
-		):
-			widget.setVisible(is_grid)
-		if is_grid:
-			self.grid_spacing_y.setEnabled(False)
-			for spin, value in (
-				(self.grid_spacing_x, media.spacing_x),
-				(self.grid_spacing_y, media.spacing_y),
-				(self.grid_offset_x, media.offset_x),
-				(self.grid_offset_y, media.offset_y),
-				(self.grid_line_width, media.line_width),
-			):
-				spin.blockSignals(True)
-				spin.setValue(value)
-				spin.blockSignals(False)
-			self._set_color_button(self.grid_color, media.color)
-		if is_animation:
-			self.animation_mode.blockSignals(True)
-			self.animation_mode.setCurrentIndex(1 if media.transparent_b else 0)
-			self.animation_mode.blockSignals(False)
-			for spin, value in zip(
-				(self.animation_direction_x, self.animation_direction_y),
-				media.direction,
-			):
-				spin.blockSignals(True)
-				spin.setValue(value)
-				spin.blockSignals(False)
-			for spin, value in (
-				(self.animation_speed, media.speed),
-				(self.animation_scale, media.noise_scale),
-			):
-				spin.blockSignals(True)
-				spin.setValue(value)
-				spin.blockSignals(False)
-			self._set_color_button(self.animation_color_a, media.color_a)
-			self._set_color_button(self.animation_color_b, media.color_b)
+		self.mask_view.refresh(media)
+		self.animation_view.refresh(media)
+		self.grid_view.refresh(media)
 		self.preview.set_image(self.model.preview_image())
-
-	@staticmethod
-	def _set_color_button(button: QPushButton, color: QColor):
-		button.setText(color.name())
-		button.setStyleSheet(
-			f"background-color: {color.name()}; color: {'white' if color.lightness() < 128 else 'black'}"
-		)
 
 	def accept(self):
 		if isinstance(self.model.layer.media, AnimationMedia):

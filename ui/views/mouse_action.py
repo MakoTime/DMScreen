@@ -14,6 +14,7 @@ class MouseActionState(Enum):
     SELECT = auto()
     PAN = auto()
     PLAYER_PAN = auto()
+    PING = auto()
     MASK = auto()
     MASK_FILL_ADD = auto()
     MASK_FILL_REMOVE = auto()
@@ -41,6 +42,7 @@ class MouseActionMenu(QFrame):
 
         self.select_button = self._make_button("Select")
         self.pan_button = self._make_button("Pan")
+        self.ping_button = self._make_button("Ping")
         self.select_button.setChecked(True)
 
         layout = QHBoxLayout(self)
@@ -48,12 +50,16 @@ class MouseActionMenu(QFrame):
         layout.setSpacing(2)
         layout.addWidget(self.select_button)
         layout.addWidget(self.pan_button)
+        layout.addWidget(self.ping_button)
 
         self.select_button.clicked.connect(
             lambda: self._set_state(MouseActionState.SELECT)
         )
         self.pan_button.clicked.connect(
             lambda: self._set_state(MouseActionState.PAN)
+        )
+        self.ping_button.clicked.connect(
+            lambda: self._set_state(MouseActionState.PING)
         )
         self._set_state(MouseActionState.SELECT)
 
@@ -166,6 +172,7 @@ class MouseActionMenu(QFrame):
         self._state = state
         self.select_button.setChecked(state is MouseActionState.SELECT)
         self.pan_button.setChecked(state is MouseActionState.PAN)
+        self.ping_button.setChecked(state is MouseActionState.PING)
         if self.player_pan_button is not None:
             self.player_pan_button.setChecked(
                 state is MouseActionState.PLAYER_PAN

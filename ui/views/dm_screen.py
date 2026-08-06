@@ -2,20 +2,23 @@ from pathlib import Path
 
 from PySide6.QtCore import QPoint
 from PySide6.QtGui import QImage
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QThread, QTimer, Qt
 from layer_manager import Layer
+from layer_media import DrawMedia
 from layer_media import ImageMedia
 from layer_media import MaskMedia
 from mouse_action import MouseActionState
 from player_controls import PlayerControlsPanel
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QSplitter
 from screen import Screen
 from side_panel import SidePanel
 from zoom_handler import ZoomHandler
+from ui.views.performance_panel import PerformancePanel
 
 
 class DMScreen(Screen):
+    render_thread_priority = QThread.Priority.LowPriority
+
     def __init__(
         self,
         layer_manager,
@@ -55,6 +58,7 @@ class DMScreen(Screen):
         self.display_widget.mask_stroke_finished.connect(
             self._finish_mask_stroke
         )
+        self.display_widget.ping_requested.connect(self._ping_at)
         self.mouse_action_menu.mask_brush_size.valueChanged.connect(
             self.display_widget.set_mask_brush_size
         )
@@ -63,6 +67,11 @@ class DMScreen(Screen):
         )
         self.display_widget.set_mask_frame_size(self.frame.size)
         self.initialise_splitter()
+        self.debug_panel = PerformancePanel(self)
+        self._debug_timer = QTimer(self)
+        self._debug_timer.setInterval(5000)
+        self._debug_timer.timeout.connect(self._refresh_debug_stats)
+        self._debug_timer.start()
         self.initialise_side_panel()
         self.side_panel.table.selectionModel().selectionChanged.connect(
             self._selected_layer_changed
@@ -97,12 +106,13 @@ class DMScreen(Screen):
     def _selected_layer_changed(self, *args):
         layer = self.side_panel.table.selected_layer()
         self.mouse_action_menu.set_mask_available(
-            layer is not None and isinstance(layer.media, MaskMedia)
+            layer is not None
+            and isinstance(layer.media, (DrawMedia, MaskMedia))
         )
 
     def _paint_mask(self, point):
         layer = self.side_panel.table.selected_layer()
-        if layer is None or not isinstance(layer.media, MaskMedia):
+        if layer is None or not isinstance(layer.media, (DrawMedia, MaskMedia)):
             return
         display_rect = self.display_widget._display_rect()
         if display_rect.isEmpty() or not display_rect.contains(point):
@@ -111,7 +121,7 @@ class DMScreen(Screen):
         x = (point.x() - display_rect.left()) * frame_size.width() / display_rect.width()
         y = (point.y() - display_rect.top()) * frame_size.height() / display_rect.height()
         current_point = QPoint(round(x), round(y))
-        if self.display_widget.mouse_action_state in (
+        if isinstance(layer.media, MaskMedia) and self.display_widget.mouse_action_state in (
             MouseActionState.MASK_FILL_ADD,
             MouseActionState.MASK_FILL_REMOVE,
         ):
@@ -144,6 +154,18 @@ class DMScreen(Screen):
     def _finish_mask_stroke(self):
         self._mask_last_point = None
 
+    def _ping_at(self, point):
+        display_rect = self.display_widget._display_rect()
+        if display_rect.isEmpty() or not display_rect.contains(point):
+            return
+        position = (
+            (point.x() - display_rect.left()) / display_rect.width(),
+            (point.y() - display_rect.top()) / display_rect.height(),
+        )
+        self.display_widget.set_ping_position(position)
+        if self.player_screen is not None:
+            self.player_screen.display_widget.set_ping_position(position)
+
     def initialise_splitter(self):
         self.splitter = QSplitter()
         # self.splitter.addWidget(self.side_panel)
@@ -170,7 +192,13 @@ class DMScreen(Screen):
         if self.player_controls is not None:
             self.splitter.setStretchFactor(2, 0)
 
-        self.layout.addWidget(self.splitter)
+        self.content_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.content_splitter.addWidget(self.splitter)
+        self.content_splitter.addWidget(self.debug_panel)
+        self.content_splitter.setStretchFactor(0, 1)
+        self.content_splitter.setStretchFactor(1, 0)
+        self.content_splitter.setSizes([self.height(), 32])
+        self.layout.addWidget(self.content_splitter)
 
         background_image = QImage(
             str(Path(__file__).resolve().parents[2] / "Obyrith Dungeon Dark.png")
@@ -180,6 +208,17 @@ class DMScreen(Screen):
         self.side_panel.add_layer(Layer("Tokens"))
         self.side_panel.add_layer(Layer("Fog"))
         self.update_player_highlight(1.0)
+
+    def _refresh_debug_stats(self):
+        with self.performance.measure("ui.performance_panel.refresh"):
+            checkers = [("DM", self.performance)]
+            if self.player_screen is not None:
+                checkers.append(("Player", self.player_screen.performance))
+            for layer in self.layer_manager.layers:
+                media_checker = getattr(layer.media, "performance", None)
+                if media_checker is not None:
+                    checkers.append((f"Media.{layer.name}", media_checker))
+            self.debug_panel.set_checkers(checkers)
 
     def update_player_highlight(self, zoom: float):
         if self.player_screen is not None:

@@ -7,7 +7,7 @@ from PySide6.QtGui import QColor, QPixmap
 from layer_manager import Layer, LayerManager
 from layer_ui import LayerModel, LayerPanel
 from dm_screen import DMScreen
-from layer_media import MaskMedia
+from layer_media import DrawMedia, MaskMedia
 from mouse_action import MouseActionMenu, MouseActionState
 from player_handler import PlayerHandler
 from player_controls import PlayerControlsPanel
@@ -192,6 +192,56 @@ class TestScreenZoom(unittest.TestCase):
             dm_screen.close()
             QApplication.processEvents()
 
+    def test_dm_menu_can_select_ping_state(self):
+        dm_screen = DMScreen(LayerManager())
+        try:
+            dm_screen.mouse_action_menu.ping_button.click()
+            self.assertEqual(
+                dm_screen.mouse_action_menu.state,
+                MouseActionState.PING,
+            )
+            self.assertEqual(
+                dm_screen.display_widget.mouse_action_state,
+                MouseActionState.PING,
+            )
+        finally:
+            dm_screen.close()
+            QApplication.processEvents()
+
+    def test_ping_is_shared_between_dm_and_player_displays(self):
+        layer_manager = LayerManager()
+        player_screen = PlayerScreen(layer_manager)
+        dm_screen = DMScreen(layer_manager, player_screen=player_screen)
+        try:
+            dm_screen.display_widget.resize(800, 600)
+            player_screen.display_widget.resize(800, 600)
+            pixmap = QPixmap(1920, 1080)
+            dm_screen.display_widget.set_source_pixmap(pixmap)
+            player_screen.display_widget.set_source_pixmap(pixmap)
+            dm_screen._ping_at(dm_screen.display_widget._display_rect().center())
+            self.assertEqual(
+                dm_screen.display_widget._ping_position,
+                player_screen.display_widget._ping_position,
+            )
+            self.assertIsNotNone(dm_screen.display_widget._ping_started)
+            self.assertIsNotNone(player_screen.display_widget._ping_started)
+        finally:
+            dm_screen.close()
+            player_screen.close()
+            QApplication.processEvents()
+
+    def test_performance_panel_can_be_resized(self):
+        dm_screen = DMScreen(LayerManager())
+        try:
+            self.assertIs(
+                dm_screen.content_splitter.widget(1),
+                dm_screen.debug_panel,
+            )
+            self.assertGreaterEqual(dm_screen.debug_panel.minimumHeight(), 32)
+        finally:
+            dm_screen.close()
+            QApplication.processEvents()
+
     def test_mask_tools_are_available_as_a_mouse_state(self):
         menu = MouseActionMenu()
         try:
@@ -226,6 +276,24 @@ class TestScreenZoom(unittest.TestCase):
             self.assertGreater(mask.current_frame().pixelColor(960, 540).alpha(), 0)
             self.assertIs(dm_screen.side_panel.table.selected_layer(), manager.layers[0])
             self.assertEqual(display._mask_brush_size, 40)
+        finally:
+            dm_screen.close()
+            QApplication.processEvents()
+
+    def test_dm_mask_stroke_paints_selected_draw_layer(self):
+        manager = LayerManager()
+        draw = DrawMedia(1920, 1080)
+        manager.add(Layer("Draw", draw))
+        dm_screen = DMScreen(manager)
+        try:
+            display = dm_screen.display_widget
+            display.resize(400, 300)
+            display.set_source_pixmap(QPixmap(100, 100))
+            dm_screen.side_panel.table.selectRow(0)
+            dm_screen.mouse_action_menu.mask_button.click()
+            dm_screen.mouse_action_menu.mask_brush_size.setValue(40)
+            display.mask_stroke.emit(display.rect().center())
+            self.assertGreater(draw.current_frame().pixelColor(960, 540).alpha(), 0)
         finally:
             dm_screen.close()
             QApplication.processEvents()
