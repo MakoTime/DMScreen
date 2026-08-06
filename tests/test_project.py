@@ -10,7 +10,7 @@ from PySide6.QtGui import QColor, QImage
 from constants import APP_VERSION
 from layer_manager import Layer, LayerManager
 from layer_media import DrawMedia, GridMedia, ImageMedia
-from project_io import load_project, save_project
+from project_io import PROJECT_VERSION, _migrate_manifest, load_project, save_project
 
 
 class ProjectArchiveTests(unittest.TestCase):
@@ -39,7 +39,12 @@ class ProjectArchiveTests(unittest.TestCase):
         project_file = tempfile.NamedTemporaryFile(suffix=".dms", delete=False)
         project_file.close()
         try:
-            save_project(project_file.name, frame, manager)
+            save_project(
+                project_file.name,
+                frame,
+                manager,
+                player_view={"zoom": 1.5, "pan_x": 12, "pan_y": -8},
+            )
             loaded_frame, loaded_layers = load_project(project_file.name)
             with zipfile.ZipFile(project_file.name) as archive:
                 manifest = json.loads(archive.read("manifest.json"))
@@ -50,8 +55,12 @@ class ProjectArchiveTests(unittest.TestCase):
         self.assertEqual(loaded_frame["width"], 32)
         self.assertEqual(loaded_frame["height"], 24)
         self.assertEqual(loaded_frame["background"], "#ff102030")
-        self.assertEqual(manifest["version"], 1)
+        self.assertEqual(manifest["version"], PROJECT_VERSION)
         self.assertEqual(manifest["app_version"], APP_VERSION)
+        self.assertEqual(
+            manifest["player_view"],
+            {"zoom": 1.5, "pan_x": 12, "pan_y": -8},
+        )
         self.assertEqual([item.name for item in loaded_layers], ["Map", "Ink", "Grid"])
         self.assertFalse(loaded_layers[0].visible)
         self.assertEqual(loaded_layers[0].offset, QPoint(12, 8))
@@ -60,6 +69,17 @@ class ProjectArchiveTests(unittest.TestCase):
         self.assertEqual(loaded_layers[0].media.current_frame().size(), image.size())
         self.assertIn(manifest["layers"][0]["media"]["asset"], assets)
         self.assertIn(manifest["layers"][1]["media"]["asset"], assets)
+
+    def test_v1_manifest_migrates_to_full_frame_player_view(self):
+        manifest = {"version": 1, "frame": {}, "layers": []}
+
+        migrated = _migrate_manifest(manifest)
+
+        self.assertEqual(migrated["version"], PROJECT_VERSION)
+        self.assertEqual(
+            migrated["player_view"],
+            {"zoom": 1.0, "pan_x": 0, "pan_y": 0},
+        )
 
 
 if __name__ == "__main__":

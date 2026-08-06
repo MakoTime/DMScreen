@@ -87,6 +87,16 @@ class AnimationWorker(QObject):
         self._gpu.close()
         self.stopped.emit()
 
+    @Slot()
+    def pause(self):
+        if self._timer is not None:
+            self._timer.stop()
+
+    @Slot()
+    def resume(self):
+        if self._timer is not None:
+            self._timer.start()
+
     def _rebuild_noise_field(self):
         self._noise_field = NoiseField(
             self.render_width,
@@ -143,6 +153,8 @@ class AnimationMedia(LayerMedia):
     render_requested = Signal()
     parameters_requested = Signal(object, object, bool, float, float, object)
     stop_requested = Signal()
+    pause_requested = Signal()
+    resume_requested = Signal()
 
     def __init__(self, width: int = 160, height: int = 90, parent=None):
         super().__init__(parent)
@@ -176,6 +188,8 @@ class AnimationMedia(LayerMedia):
         self.render_requested.connect(self._worker.render)
         self.parameters_requested.connect(self._worker.set_parameters)
         self.stop_requested.connect(self._worker.stop)
+        self.pause_requested.connect(self._worker.pause)
+        self.resume_requested.connect(self._worker.resume)
         self._worker.frame_ready.connect(self._on_frame_ready)
         self._worker.phase_ready.connect(self._on_phase_ready)
         self._worker.stopped.connect(
@@ -257,6 +271,14 @@ class AnimationMedia(LayerMedia):
         if self._thread.isRunning():
             self.stop_requested.emit()
             self._thread.wait(1000)
+
+    def pause(self):
+        if self._thread.isRunning():
+            self.pause_requested.emit()
+
+    def resume(self):
+        if self._thread.isRunning():
+            self.resume_requested.emit()
 
     def _advance(self):
         with self.performance.measure("media.animation.advance"):

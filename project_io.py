@@ -21,7 +21,7 @@ from layer_media import (
 )
 from constants import APP_VERSION
 
-PROJECT_VERSION = 1
+PROJECT_VERSION = 2
 
 
 def _migrate_manifest(manifest):
@@ -48,13 +48,36 @@ def _migrate_manifest(manifest):
     return manifest
 
 
-PROJECT_MIGRATIONS = {}
+def _migrate_v1_to_v2(manifest):
+    manifest = dict(manifest)
+    manifest["version"] = 2
+    manifest.setdefault(
+        "player_view",
+        {"zoom": 1.0, "pan_x": 0, "pan_y": 0},
+    )
+    return manifest
 
 
-def save_project(path, frame, layer_manager: LayerManager):
+PROJECT_MIGRATIONS = {1: _migrate_v1_to_v2}
+
+
+def save_project(
+    path,
+    frame,
+    layer_manager: LayerManager,
+    scene_name=None,
+    player_view=None,
+):
+    player_view = player_view or {"zoom": 1.0, "pan_x": 0, "pan_y": 0}
     manifest = {
         "version": PROJECT_VERSION,
         "app_version": APP_VERSION,
+        "scene_name": scene_name,
+        "player_view": {
+            "zoom": float(player_view.get("zoom", 1.0)),
+            "pan_x": int(player_view.get("pan_x", 0)),
+            "pan_y": int(player_view.get("pan_y", 0)),
+        },
         "frame": {
             "width": frame.size.width(),
             "height": frame.size.height(),
@@ -84,7 +107,7 @@ def save_project(path, frame, layer_manager: LayerManager):
         )
 
 
-def load_project(path):
+def load_project(path, include_metadata=False):
     with zipfile.ZipFile(path, "r") as archive:
         manifest = json.loads(archive.read("manifest.json"))
         manifest = _migrate_manifest(manifest)
@@ -93,6 +116,13 @@ def load_project(path):
             _deserialize_layer(data, archive, frame["width"], frame["height"])
             for data in manifest["layers"]
         ]
+    if include_metadata:
+        return (
+            frame,
+            layers,
+            manifest.get("scene_name"),
+            manifest.get("player_view", {"zoom": 1.0, "pan_x": 0, "pan_y": 0}),
+        )
     return frame, layers
 
 

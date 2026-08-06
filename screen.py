@@ -20,6 +20,9 @@ from render_models import RenderState
 from media.gpu_composition import GpuCompositionRenderer
 
 
+MAX_DISPLAY_DIMENSION = 4096
+
+
 class RenderEngine(QObject):
     """Latest-frame render coordinator and background render executor."""
 
@@ -459,6 +462,8 @@ class AspectRatioLabel(QLabel):
         )
         self.setMinimumSize(0, 0)
         self.zoom = 1.0
+        self.max_zoom = 4.0
+        self.limit_render_size = False
         self.pan_offset = QPoint()
         self.highlight_rect = None
         self.mouse_action_state = MouseActionState.SELECT
@@ -495,7 +500,7 @@ class AspectRatioLabel(QLabel):
 
     def set_zoom(self, zoom: float):
         with self.performance.measure("ui.display.set_zoom"):
-            self.zoom = max(0.1, min(4.0, float(zoom)))
+            self.zoom = max(0.1, min(self.max_zoom, float(zoom)))
             self._update_pixmap()
 
     def set_mouse_action_state(self, state):
@@ -540,10 +545,30 @@ class AspectRatioLabel(QLabel):
         return rect
 
     def visible_source_rect(self):
-        display_rect = self._display_rect()
+        return self.visible_source_rect_for(self.zoom, self.pan_offset)
+
+    def visible_source_rect_for(self, zoom, pan_offset, viewport_size=None):
+        viewport_size = QSize(viewport_size or self.size())
+        if (
+            self._source_pixmap.isNull()
+            or viewport_size.width() <= 0
+            or viewport_size.height() <= 0
+        ):
+            return (0.0, 0.0, 1.0, 1.0)
+        fit_scale = min(
+            viewport_size.width() / self._source_pixmap.width(),
+            viewport_size.height() / self._source_pixmap.height(),
+        )
+        display_size = QSize(
+            max(1, round(self._source_pixmap.width() * fit_scale * zoom)),
+            max(1, round(self._source_pixmap.height() * fit_scale * zoom)),
+        )
+        display_rect = QRect(QPoint(), display_size)
+        viewport_rect = QRect(QPoint(), viewport_size)
+        display_rect.moveCenter(viewport_rect.center() + QPoint(pan_offset))
         if display_rect.isEmpty():
             return (0.0, 0.0, 1.0, 1.0)
-        visible = display_rect.intersected(self.rect())
+        visible = display_rect.intersected(viewport_rect)
         return (
             max(0.0, min(1.0, (visible.left() - display_rect.left()) / display_rect.width())),
             max(0.0, min(1.0, (visible.top() - display_rect.top()) / display_rect.height())),
@@ -806,9 +831,22 @@ class AspectRatioLabel(QLabel):
             self.width() / self._source_pixmap.width(),
             self.height() / self._source_pixmap.height(),
         )
+        max_zoom = self.max_zoom
+        if self.limit_render_size:
+            max_zoom = min(
+                max_zoom,
+                MAX_DISPLAY_DIMENSION
+                / max(
+                    1,
+                    self._source_pixmap.width() * fit_scale,
+                    self._source_pixmap.height() * fit_scale,
+                ),
+            )
+        effective_zoom = min(self.zoom, max_zoom)
+        self.zoom = effective_zoom
         scaled_pixmap = self._source_pixmap.scaled(
-            max(1, round(self._source_pixmap.width() * fit_scale * self.zoom)),
-            max(1, round(self._source_pixmap.height() * fit_scale * self.zoom)),
+            max(1, round(self._source_pixmap.width() * fit_scale * effective_zoom)),
+            max(1, round(self._source_pixmap.height() * fit_scale * effective_zoom)),
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
@@ -1010,6 +1048,17 @@ class Screen(QWidget):
         with self.performance.measure("ui.screen.set_zoom"):
             self.display_widget.set_zoom(zoom)
         self.zoom_changed.emit(self.display_widget.zoom)
+
+    def set_layer_manager(self, layer_manager: LayerManager):
+        if layer_manager is self.layer_manager:
+            return
+        self.layer_manager.unsubscribe_from_updates(self.draw)
+        self.layer_manager.unsubscribe_from_media_updates(self.draw)
+        self.layer_manager = layer_manager
+        self.layer_manager.subscribe_to_updates(self.draw)
+        self.layer_manager.subscribe_to_media_updates(self.draw)
+        self._last_render_signature = None
+        self.draw()
 
     def build_ui(self):
         raise NotImplementedError

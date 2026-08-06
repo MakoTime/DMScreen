@@ -33,6 +33,12 @@ class GifMedia(LayerMedia):
     def stop(self):
         self._movie.stop()
 
+    def pause(self):
+        self._movie.setPaused(True)
+
+    def resume(self):
+        self._movie.setPaused(False)
+
 
 class VideoMedia(LayerMedia):
     def __init__(self, file_path: str, parent=None):
@@ -65,3 +71,9 @@ class VideoMedia(LayerMedia):
 
     def stop(self):
         self._player.stop()
+
+    def pause(self):
+        self._player.pause()
+
+    def resume(self):
+        self._player.play()

@@ -13,6 +13,7 @@ from player_handler import PlayerHandler
 from player_controls import PlayerControlsPanel
 from player_screen import PlayerScreen
 from screen import Frame
+from scenes import Scene
 from side_panel import SidePanel
 from zoom_handler import ZoomHandler
 
@@ -105,7 +106,7 @@ class TestPlayerHandler(unittest.TestCase):
         self.assertFalse(self.window.isVisible())
 
     def test_handler_stacks_buttons_without_expanding_vertically(self):
-        self.assertEqual(self.handler.layout().count(), 2)
+        self.assertEqual(self.handler.layout().count(), 3)
         self.assertEqual(
             self.handler.layout().sizeConstraint(),
             QLayout.SizeConstraint.SetFixedSize,
@@ -113,6 +114,12 @@ class TestPlayerHandler(unittest.TestCase):
 
 
 class TestScreenZoom(unittest.TestCase):
+    def test_default_layers_use_a_grid_media_layer(self):
+        layers = DMScreen.default_layers()
+
+        self.assertEqual([layer.name for layer in layers], ["Grid", "Background"])
+        self.assertIsInstance(layers[0].media, GridMedia)
+
     def test_screen_zoom_is_independent_per_screen(self):
         first = PlayerScreen(LayerManager())
         second = PlayerScreen(LayerManager())
@@ -155,6 +162,56 @@ class TestScreenZoom(unittest.TestCase):
             player_screen.close()
             QApplication.processEvents()
 
+    def test_dm_only_player_view_uses_player_pan_units(self):
+        dm_manager = LayerManager()
+        player_manager = LayerManager()
+        player_screen = PlayerScreen(player_manager)
+        dm_screen = DMScreen(dm_manager, player_screen=player_screen)
+        scene = Scene("Active", dm_manager, Frame(1920, 1080))
+        try:
+            dm_screen.display_widget.resize(1000, 700)
+            player_screen.display_widget.resize(800, 600)
+            dm_screen.display_widget.set_source_pixmap(QPixmap(1920, 1080))
+            player_screen.display_widget.set_source_pixmap(
+                QPixmap(1920, 1080)
+            )
+            dm_screen.display_widget.set_zoom(1.5)
+            scene.player_zoom = 2.0
+            scene.player_pan_x = 80
+            scene.player_pan_y = -30
+            dm_screen.set_player_view_scene(scene)
+
+            expected = dm_screen.display_widget.visible_source_rect_for(
+                scene.player_zoom,
+                QPoint(scene.player_pan_x, scene.player_pan_y),
+                player_screen.display_widget.size(),
+            )
+            for actual, expected_value in zip(
+                dm_screen.display_widget.highlight_rect,
+                expected,
+            ):
+                self.assertAlmostEqual(actual, expected_value)
+
+            pending = []
+            dm_screen.pending_player_pan.connect(pending.append)
+            dm_screen._pan_player(QPoint(20, 10))
+            dm_pixmap = dm_screen.display_widget.pixmap()
+            player_size = dm_screen._scene_display_size(
+                scene,
+                player_screen.display_widget.size(),
+            )
+            self.assertEqual(
+                pending[-1],
+                QPoint(
+                    round(20 * player_size[0] / dm_pixmap.width()),
+                    round(10 * player_size[1] / dm_pixmap.height()),
+                ),
+            )
+        finally:
+            dm_screen.close()
+            player_screen.close()
+            QApplication.processEvents()
+
     def test_mouse_action_menu_belongs_only_to_dm_screen(self):
         screen = PlayerScreen(LayerManager())
         try:
@@ -172,11 +229,15 @@ class TestScreenZoom(unittest.TestCase):
             )
             self.assertIs(
                 dm_screen.layout.itemAt(0).widget(),
+                dm_screen.scene_tabs,
+            )
+            self.assertIs(
+                dm_screen.layout.itemAt(1).widget(),
                 dm_screen.mouse_action_menu,
             )
             self.assertLessEqual(dm_screen.mouse_action_menu.height(), 32)
             self.assertEqual(
-                dm_screen.layout.itemAt(0).alignment(),
+                dm_screen.layout.itemAt(1).alignment(),
                 Qt.AlignmentFlag.AlignHCenter,
             )
             dm_screen.mouse_action_menu.player_pan_button.click()

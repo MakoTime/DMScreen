@@ -1,12 +1,9 @@
-from pathlib import Path
 from math import ceil, floor, hypot, cos, pi, sin
 
-from PySide6.QtCore import QPoint
-from PySide6.QtGui import QImage
+from PySide6.QtCore import QPoint, Signal
 from PySide6.QtCore import QThread, QTimer, Qt
 from layer_manager import Layer
 from layer_media import DrawMedia
-from layer_media import ImageMedia
 from layer_media import MaskMedia
 from layer_media import GridMedia
 from mouse_action import MouseActionState
@@ -16,10 +13,14 @@ from screen import Screen
 from side_panel import SidePanel
 from zoom_handler import ZoomHandler
 from ui.views.performance_panel import PerformancePanel
+from ui.views.scene_tabs import SceneTabs
 
 
 class DMScreen(Screen):
     render_thread_priority = QThread.Priority.LowPriority
+    pending_player_pan = Signal(object)
+    pending_player_zoom = Signal(float)
+    player_close_requested = Signal()
 
     def __init__(
         self,
@@ -34,15 +35,21 @@ class DMScreen(Screen):
         self.player_screen = player_screen
         self._mask_last_point = None
         self._shape_definition = None
+        self._has_active_scene = True
+        self._player_view_scene = None
+        if player_screen is None:
+            layer_manager.set_player_attached(False)
         super().__init__(layer_manager, parent)
 
     def build_ui(self):
+        self.scene_tabs = SceneTabs(self)
+        self.layout.insertWidget(0, self.scene_tabs)
         self.mouse_action_menu.add_player_pan_option()
         self.mouse_action_menu.add_mask_option()
         self.mouse_action_menu.setParent(self)
         self.mouse_action_menu.adjustSize()
         self.layout.insertWidget(
-            0,
+            1,
             self.mouse_action_menu,
             0,
             Qt.AlignmentFlag.AlignHCenter,
@@ -58,6 +65,9 @@ class DMScreen(Screen):
                 self._zoom_player_by
             )
         self.display_widget.mask_stroke.connect(self._paint_mask)
+        self.display_widget.view_changed.connect(
+            self._active_scene_view_changed
+        )
         self.display_widget.mask_stroke_finished.connect(
             self._finish_mask_stroke
         )
@@ -86,6 +96,10 @@ class DMScreen(Screen):
         )
         self._selected_layer_changed()
 
+    def closeEvent(self, event):
+        self.player_close_requested.emit()
+        super().closeEvent(event)
+
     def _pan_player_from_dm(self, delta):
         self._pan_player(delta)
 
@@ -95,6 +109,29 @@ class DMScreen(Screen):
         self._pan_player(delta)
 
     def _pan_player(self, delta):
+        if not self._player_scene_matches():
+            if self._player_view_scene is not None:
+                dm_size = self._scene_display_size(
+                    self._player_view_scene,
+                    self.display_widget.size(),
+                    self.display_widget.zoom,
+                )
+                dm_pixmap = self.display_widget.pixmap()
+                if dm_pixmap is not None and not dm_pixmap.isNull():
+                    dm_size = (dm_pixmap.width(), dm_pixmap.height())
+                player_size = self._scene_display_size(
+                    self._player_view_scene,
+                    self.player_screen.display_widget.size(),
+                )
+                scale_x = player_size[0] / max(1, dm_size[0])
+                scale_y = player_size[1] / max(1, dm_size[1])
+                self.pending_player_pan.emit(
+                    QPoint(
+                        round(delta.x() * scale_x),
+                        round(delta.y() * scale_y),
+                    )
+                )
+            return
         player_display = self.player_screen.display_widget
         dm_pixmap = self.display_widget.pixmap()
         player_pixmap = player_display.pixmap()
@@ -107,6 +144,10 @@ class DMScreen(Screen):
         )
 
     def _zoom_player_by(self, steps):
+        if not self._player_scene_matches():
+            if self._player_view_scene is not None:
+                self.pending_player_zoom.emit(steps)
+            return
         player_display = self.player_screen.display_widget
         player_display.set_zoom(player_display.zoom * (1.1 ** steps))
         player_display.zoom_changed.emit(player_display.zoom)
@@ -117,6 +158,29 @@ class DMScreen(Screen):
             layer is not None
             and isinstance(layer.media, (DrawMedia, MaskMedia))
         )
+
+    @staticmethod
+    def _scene_display_size(scene, widget_size, zoom=None):
+        frame_size = scene.frame.size
+        if frame_size.width() <= 0 or frame_size.height() <= 0:
+            return 0, 0
+        if zoom is None:
+            zoom = scene.player_zoom
+        fit_scale = min(
+            widget_size.width() / frame_size.width(),
+            widget_size.height() / frame_size.height(),
+        )
+        return (
+            max(1, round(frame_size.width() * fit_scale * zoom)),
+            max(1, round(frame_size.height() * fit_scale * zoom)),
+        )
+
+    def _active_scene_view_changed(self, *_args):
+        if self._player_view_scene is not None:
+            self.update_player_highlight(
+                self._player_view_scene.player_zoom,
+                self._player_view_scene,
+            )
 
     def _paint_mask(self, point):
         layer = self.side_panel.table.selected_layer()
@@ -163,6 +227,8 @@ class DMScreen(Screen):
         self._mask_last_point = None
 
     def _ping_at(self, point):
+        if not self._player_scene_matches():
+            return
         display_rect = self.display_widget._display_rect()
         if display_rect.isEmpty() or not display_rect.contains(point):
             return
@@ -175,6 +241,8 @@ class DMScreen(Screen):
             self.player_screen.display_widget.set_ping_position(position)
 
     def _ruler_changed(self, start, end):
+        if not self._player_scene_matches():
+            return
         display_rect = self.display_widget._display_rect()
         if display_rect.isEmpty():
             return
@@ -223,6 +291,8 @@ class DMScreen(Screen):
                 self.player_screen.display_widget.clear_shape()
 
     def _shape_changed(self, start, end):
+        if not self._player_scene_matches():
+            return
         shape = self.mouse_action_menu.shape_select.currentText()
         if shape not in ("Cone", "Line", "Circle", "Square"):
             return
@@ -239,7 +309,7 @@ class DMScreen(Screen):
         self._update_shape_overlay()
 
     def _update_shape_overlay(self):
-        if self._shape_definition is None:
+        if self._shape_definition is None or not self._player_scene_matches():
             return
         shape, start_position, end_position = self._shape_definition
         start_frame = self._normalized_point_to_frame(start_position)
@@ -569,15 +639,47 @@ class DMScreen(Screen):
         self.update_player_highlight(1.0)
 
     def create_default_layers(self):
-        background_image = QImage(
-            str(Path(__file__).resolve().parents[2] / "Obyrith Dungeon Dark.png")
+        for layer in self.default_layers():
+            self.side_panel.add_layer(layer)
+
+    @staticmethod
+    def default_layers():
+        return [
+            Layer("Grid", GridMedia()),
+            Layer("Background"),
+        ]
+
+    def set_scene(self, layer_manager, frame):
+        self.set_layer_manager(layer_manager)
+        self.frame = frame
+        self.side_panel.set_scene(layer_manager, frame)
+        self.display_widget.set_mask_frame_size(self.frame.size)
+        self.reset_project_overlays()
+        self.update_synchronized_tools()
+        self.sync_frame_settings()
+
+    def _player_scene_matches(self):
+        return (
+            self._has_active_scene
+            and (
+                self.player_screen is None
+                or self.layer_manager is self.player_screen.layer_manager
+            )
         )
-        self.side_panel.add_layer(
-            Layer("Background", ImageMedia(background_image))
+
+    def set_scene_available(self, available):
+        self._has_active_scene = bool(available)
+        self.update_synchronized_tools()
+
+    def set_player_view_scene(self, scene):
+        self._player_view_scene = scene
+        if scene is not None:
+            self.update_player_highlight(scene.player_zoom, scene)
+
+    def update_synchronized_tools(self):
+        self.mouse_action_menu.set_synchronized_tools_available(
+            self._player_scene_matches()
         )
-        self.side_panel.add_layer(Layer("Grid"))
-        self.side_panel.add_layer(Layer("Tokens"))
-        self.side_panel.add_layer(Layer("Fog"))
 
     def reset_project_overlays(self):
         self._shape_definition = None
@@ -598,7 +700,16 @@ class DMScreen(Screen):
                     checkers.append((f"Media.{layer.name}", media_checker))
             self.debug_panel.set_checkers(checkers)
 
-    def update_player_highlight(self, zoom: float):
+    def update_player_highlight(self, zoom: float, scene=None):
+        if scene is not None:
+            self.set_player_viewport_rect(
+                self.display_widget.visible_source_rect_for(
+                    scene.player_zoom,
+                    QPoint(scene.player_pan_x, scene.player_pan_y),
+                    self.player_screen.display_widget.size(),
+                )
+            )
+            return
         if self.player_screen is not None:
             self.set_player_viewport_rect(
                 self.player_screen.display_widget.visible_source_rect()

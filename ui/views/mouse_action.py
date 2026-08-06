@@ -159,6 +159,16 @@ class MouseActionMenu(QFrame):
             self._set_state(MouseActionState.SELECT)
         self.adjustSize()
 
+    def set_synchronized_tools_available(self, available):
+        for widget in (self.ping_button, self.ruler_button, self.shape_button):
+            widget.setEnabled(available)
+        if not available and self.state in (
+            MouseActionState.PING,
+            MouseActionState.RULER,
+            MouseActionState.SHAPE,
+        ):
+            self._set_state(MouseActionState.SELECT)
+
     @property
     def mask_erase(self):
         return self.mask_erase_button is not None and self.mask_erase_button.isChecked()

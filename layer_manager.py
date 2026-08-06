@@ -27,6 +27,7 @@ class LayerManager:
         self.notify_update_callbacks: list[callable] = []
         self.notify_media_callbacks: list[callable] = []
         self._connected_media: dict[int, LayerMedia] = {}
+        self.player_attached = True
 
     def add(self, layer: Layer):
         self.layers.append(layer)
@@ -61,6 +62,9 @@ class LayerManager:
     def subscribe_to_media_updates(self, callback: callable):
         self.notify_media_callbacks.append(callback)
 
+    def unsubscribe_to_updates(self, callback: callable):
+        self.unsubscribe_from_updates(callback)
+
     def unsubscribe_from_updates(self, callback: callable):
         if callback in self.notify_update_callbacks:
             self.notify_update_callbacks.remove(callback)
@@ -74,6 +78,14 @@ class LayerManager:
             self._connect_layer_media(layer)
         for callback in self.notify_update_callbacks:
             callback()
+
+    def set_player_attached(self, attached: bool):
+        self.player_attached = bool(attached)
+        for layer in self.layers:
+            if layer.media is None:
+                continue
+            activity = layer.media.resume if self.player_attached else layer.media.pause
+            activity()
 
     def on_media_update(self):
         for callback in self.notify_media_callbacks:
@@ -91,6 +103,8 @@ class LayerManager:
         if layer.media is not None:
             layer.media.frame_changed.connect(self.on_media_update)
             self._connected_media[layer_id] = layer.media
+            if not self.player_attached:
+                layer.media.pause()
 
 
 def __getattr__(name):

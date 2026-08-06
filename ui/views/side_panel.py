@@ -47,6 +47,9 @@ class SidePanel(QWidget):
     def add_layer(self, layer: Layer):
         self.layer_panel.add_layer(layer)
 
+    def set_scene(self, layer_manager: LayerManager, frame: Frame):
+        self.layer_panel.set_scene(layer_manager, frame)
+
     def remove_selected(self):
         self.layer_panel.remove_selected()
 

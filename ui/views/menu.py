@@ -62,8 +62,12 @@ class MenuBar(QMenuBar):
 
     frame_changed = Signal()
     save_requested = Signal()
+    save_as_requested = Signal()
+    save_all_requested = Signal()
     open_requested = Signal()
     new_requested = Signal()
+    clear_all_scenes_requested = Signal()
+    rename_scene_requested = Signal()
 
     def __init__(
         self,
@@ -81,18 +85,25 @@ class MenuBar(QMenuBar):
         self.open_action = QAction("Open", self)
         self.save_action = QAction("Save", self)
         self.save_as_action = QAction("Save As", self)
+        self.save_all_action = QAction("Save All Scenes", self)
+        self.clear_all_scenes_action = QAction("Clear All Scenes", self)
         for action in (
             self.new_action,
             self.open_action,
             self.save_action,
             self.save_as_action,
+            self.save_all_action,
+            self.clear_all_scenes_action,
         ):
             self.file_menu.addAction(action)
 
         self.edit_menu = self.addMenu("Edit")
         self.edit_frame_action = QAction("Edit Frame", self)
+        self.rename_scene_action = QAction("Rename Scene", self)
         self.edit_frame_action.triggered.connect(self.edit_frame)
+        self.rename_scene_action.triggered.connect(self.rename_scene_requested.emit)
         self.edit_menu.addAction(self.edit_frame_action)
+        self.edit_menu.addAction(self.rename_scene_action)
 
         self.player_menu = self.addMenu("Player")
         self.show_player_action = QAction("Show Player Window", self)
@@ -104,9 +115,13 @@ class MenuBar(QMenuBar):
             self.player_handler.close_player
         )
         self.save_action.triggered.connect(self.save_requested.emit)
-        self.save_as_action.triggered.connect(self.save_requested.emit)
+        self.save_as_action.triggered.connect(self.save_as_requested.emit)
+        self.save_all_action.triggered.connect(self.save_all_requested.emit)
         self.open_action.triggered.connect(self.open_requested.emit)
         self.new_action.triggered.connect(self.new_requested.emit)
+        self.clear_all_scenes_action.triggered.connect(
+            self.clear_all_scenes_requested.emit
+        )
         self.player_menu.addAction(self.show_player_action)
         self.player_menu.addAction(self.close_player_action)
 

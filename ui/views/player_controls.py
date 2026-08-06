@@ -1,6 +1,7 @@
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QDoubleSpinBox, QFormLayout, QPushButton, QWidget
 
+from constants import PLAYER_ZOOM_MAX
 from player_handler import PlayerHandler
 
 
@@ -26,7 +27,7 @@ class PlayerControlsPanel(QWidget):
     @staticmethod
     def _zoom_spin():
         spin = QDoubleSpinBox()
-        spin.setRange(0.1, 4.0)
+        spin.setRange(0.1, PLAYER_ZOOM_MAX)
         spin.setSingleStep(0.1)
         spin.setDecimals(1)
         spin.setValue(1.0)

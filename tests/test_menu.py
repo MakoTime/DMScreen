@@ -36,11 +36,18 @@ class TestMenuBar(unittest.TestCase):
         )
         self.assertEqual(
             [action.text() for action in self.menu_bar.file_menu.actions()],
-            ["New", "Open", "Save", "Save As"],
+            [
+                "New",
+                "Open",
+                "Save",
+                "Save As",
+                "Save All Scenes",
+                "Clear All Scenes",
+            ],
         )
         self.assertEqual(
             [action.text() for action in self.menu_bar.edit_menu.actions()],
-            ["Edit Frame"],
+            ["Edit Frame", "Rename Scene"],
         )
         self.assertEqual(
             [action.text() for action in self.menu_bar.player_menu.actions()],
@@ -64,6 +71,18 @@ class TestMenuBar(unittest.TestCase):
         self.assertEqual(self.frame.size.height(), 600)
         self.assertEqual(self.frame.background_color, QColor("#203040"))
         self.assertEqual(changed, [True])
+
+    def test_save_and_save_as_emit_distinct_signals(self):
+        saved = []
+        saved_as = []
+        self.menu_bar.save_requested.connect(lambda: saved.append(True))
+        self.menu_bar.save_as_requested.connect(lambda: saved_as.append(True))
+
+        self.menu_bar.save_action.trigger()
+        self.menu_bar.save_as_action.trigger()
+
+        self.assertEqual(saved, [True])
+        self.assertEqual(saved_as, [True])
 
     def test_player_menu_actions_control_player_window(self):
         self.menu_bar.show_player_action.trigger()

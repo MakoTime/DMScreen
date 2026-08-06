@@ -188,6 +188,17 @@ class LayerModel(QAbstractTableModel):
             table.setCurrentIndex(index)
             table.selectRow(current_row)
 
+    def set_scene(self, layer_manager: LayerManager):
+        if layer_manager is self.layer_manager:
+            return
+        self.layer_manager.unsubscribe_from_updates(self.refresh)
+        self.layer_manager.unsubscribe_from_media_updates(self.media_refresh)
+        self.layer_manager = layer_manager
+        layer_manager.subscribe_to_updates(self.refresh)
+        layer_manager.subscribe_to_media_updates(self.media_refresh)
+        self.beginResetModel()
+        self.endResetModel()
+
     def media_refresh(self):
         """Keep media changes out of the model reset path during playback/painting."""
         if self._updating_manager or self.rowCount() == 0:
@@ -280,6 +291,12 @@ class LayerPanel(QWidget):
     def add_layer(self, layer: Layer):
         """Add a layer to the manager and table."""
         self.layer_manager.add(layer)
+
+    def set_scene(self, layer_manager: LayerManager, frame: Frame):
+        self.layer_manager = layer_manager
+        self.table.model_instance.set_scene(layer_manager)
+        self.edit_factory.frame = frame
+        self.edit_factory.layer_manager = layer_manager
 
     def remove_selected(self):
         """Remove the currently selected layer."""

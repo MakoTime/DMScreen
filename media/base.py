@@ -35,3 +35,9 @@ class LayerMedia(QObject):
 
     def stop(self):
         pass
+
+    def pause(self):
+        pass
+
+    def resume(self):
+        pass
