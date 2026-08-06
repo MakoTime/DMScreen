@@ -7,7 +7,7 @@ from PySide6.QtGui import QColor, QPixmap
 from layer_manager import Layer, LayerManager
 from layer_ui import LayerModel, LayerPanel
 from dm_screen import DMScreen
-from layer_media import DrawMedia, MaskMedia
+from layer_media import DrawMedia, GridMedia, MaskMedia
 from mouse_action import MouseActionMenu, MouseActionState
 from player_handler import PlayerHandler
 from player_controls import PlayerControlsPanel
@@ -204,6 +204,193 @@ class TestScreenZoom(unittest.TestCase):
                 dm_screen.display_widget.mouse_action_state,
                 MouseActionState.PING,
             )
+        finally:
+            dm_screen.close()
+            QApplication.processEvents()
+
+    def test_dm_menu_can_select_ruler_state(self):
+        dm_screen = DMScreen(LayerManager())
+        try:
+            dm_screen.mouse_action_menu.ruler_button.click()
+            self.assertEqual(
+                dm_screen.mouse_action_menu.state,
+                MouseActionState.RULER,
+            )
+            self.assertEqual(
+                dm_screen.display_widget.mouse_action_state,
+                MouseActionState.RULER,
+            )
+        finally:
+            dm_screen.close()
+            QApplication.processEvents()
+
+    def test_shape_menu_exposes_cone_mode(self):
+        dm_screen = DMScreen(LayerManager())
+        try:
+            self.assertEqual(
+                [
+                    dm_screen.mouse_action_menu.shape_select.itemText(index)
+                    for index in range(dm_screen.mouse_action_menu.shape_select.count())
+                ],
+                ["Cone", "Line", "Circle", "Square"],
+            )
+            dm_screen.mouse_action_menu.shape_button.click()
+            self.assertEqual(
+                dm_screen.mouse_action_menu.state,
+                MouseActionState.SHAPE,
+            )
+            self.assertEqual(
+                dm_screen.mouse_action_menu.shape_select.currentText(),
+                "Cone",
+            )
+            self.assertFalse(dm_screen.mouse_action_menu.shape_select.isHidden())
+        finally:
+            dm_screen.close()
+            QApplication.processEvents()
+
+    def test_shape_menu_enables_circle_mode(self):
+        dm_screen = DMScreen(LayerManager())
+        try:
+            circle_index = dm_screen.mouse_action_menu.shape_select.findText("Circle")
+            self.assertTrue(
+                dm_screen.mouse_action_menu.shape_select.model().item(circle_index).isEnabled()
+            )
+        finally:
+            dm_screen.close()
+            QApplication.processEvents()
+
+    def test_cone_highlights_intersecting_grid_cells(self):
+        manager = LayerManager()
+        manager.add(Layer("Grid", GridMedia(1920, 1080)))
+        dm_screen = DMScreen(manager)
+        try:
+            dm_screen.display_widget.resize(800, 600)
+            dm_screen.display_widget.set_source_pixmap(QPixmap(1920, 1080))
+            dm_screen.mouse_action_menu.shape_button.click()
+            dm_screen._shape_changed(QPoint(100, 100), QPoint(300, 100))
+            self.assertEqual(len(dm_screen.display_widget._shape_polygon), 3)
+            self.assertAlmostEqual(
+                dm_screen.display_widget._shape_polygon[0][0],
+                300 / 1919,
+            )
+            self.assertGreater(len(dm_screen.display_widget._shape_cells), 0)
+        finally:
+            dm_screen.close()
+            QApplication.processEvents()
+
+    def test_cone_polygon_has_original_opening(self):
+        start = (100.0, 100.0)
+        end = (200.0, 100.0)
+        polygon = DMScreen._cone_polygon(start, end)
+        self.assertEqual(polygon[1], (200.0, 150.0))
+        self.assertEqual(polygon[2], (200.0, 50.0))
+
+    def test_shape_cell_threshold_excludes_small_overlap(self):
+        overlap = DMScreen._polygon_intersection_area(
+            [(0.0, 0.0), (20.0, 0.0), (0.0, 20.0)],
+            (0.0, 0.0, 100.0, 100.0),
+        )
+        self.assertAlmostEqual(overlap, 200.0)
+        self.assertLess(overlap, 100.0 * 100.0 * 0.05)
+
+    def test_circle_uses_press_as_center_and_release_as_radius(self):
+        polygon = DMScreen._circle_polygon((100.0, 100.0), (130.0, 100.0))
+        self.assertEqual(len(polygon), 64)
+        self.assertAlmostEqual(polygon[0][0], 130.0)
+        self.assertAlmostEqual(polygon[0][1], 100.0)
+        self.assertAlmostEqual(polygon[16][0], 100.0)
+        self.assertAlmostEqual(polygon[16][1], 130.0)
+
+    def test_circle_center_snaps_to_grid_cell_center(self):
+        grid = GridMedia(1920, 1080)
+        grid.set_parameters(100, 100, 10, 20, 2, QColor("white"))
+        snapped = DMScreen._snap_to_grid((58, 141), grid)
+        self.assertEqual(snapped, (60.0, 170.0))
+        grid.stop()
+
+    def test_shape_menu_enables_square_mode(self):
+        dm_screen = DMScreen(LayerManager())
+        try:
+            square_index = dm_screen.mouse_action_menu.shape_select.findText("Square")
+            self.assertTrue(
+                dm_screen.mouse_action_menu.shape_select.model().item(square_index).isEnabled()
+            )
+        finally:
+            dm_screen.close()
+            QApplication.processEvents()
+
+    def test_shape_menu_enables_line_mode(self):
+        dm_screen = DMScreen(LayerManager())
+        try:
+            line_index = dm_screen.mouse_action_menu.shape_select.findText("Line")
+            self.assertTrue(
+                dm_screen.mouse_action_menu.shape_select.model().item(line_index).isEnabled()
+            )
+        finally:
+            dm_screen.close()
+            QApplication.processEvents()
+
+    def test_square_uses_opposite_drag_corners(self):
+        polygon = DMScreen._square_polygon((200.0, 300.0), (100.0, 100.0))
+        self.assertEqual(
+            polygon,
+            [(100.0, 100.0), (200.0, 100.0), (200.0, 300.0), (100.0, 300.0)],
+        )
+
+    def test_line_intersection_highlights_crossed_cell(self):
+        self.assertTrue(
+            DMScreen._line_intersects_rect(
+                (-10.0, 50.0), (110.0, 50.0), 0.0, 0.0, 100.0, 100.0
+            )
+        )
+        self.assertFalse(
+            DMScreen._line_intersects_rect(
+                (-10.0, 110.0), (110.0, 110.0), 0.0, 0.0, 100.0, 100.0
+            )
+        )
+        self.assertEqual(
+            DMScreen._line_length_in_rect(
+                (-10.0, -10.0), (110.0, 110.0), 0.0, 100.0, 100.0, 200.0
+            ),
+            0.0,
+        )
+
+    def test_shape_rebuilds_when_frame_size_changes(self):
+        dm_screen = DMScreen(LayerManager())
+        try:
+            dm_screen.display_widget.resize(800, 600)
+            dm_screen.display_widget.set_source_pixmap(QPixmap(1920, 1080))
+            dm_screen.mouse_action_menu.shape_button.click()
+            dm_screen.mouse_action_menu.shape_select.setCurrentText("Circle")
+            dm_screen._shape_changed(QPoint(100, 100), QPoint(200, 100))
+            original = dm_screen.display_widget._shape_polygon
+            dm_screen.frame.set_size(800, 600)
+            dm_screen.sync_frame_settings()
+            resized = dm_screen.display_widget._shape_polygon
+            self.assertIsNot(original, resized)
+            self.assertEqual(len(resized), len(original))
+        finally:
+            dm_screen.close()
+            QApplication.processEvents()
+
+    def test_ruler_snaps_endpoints_to_grid_cell_centers(self):
+        grid = GridMedia(1920, 1080)
+        grid.set_parameters(100, 100, 10, 20, 2, QColor("white"))
+        snapped = DMScreen._snap_to_grid((58, 141), grid)
+        self.assertEqual(snapped, (60.0, 170.0))
+        grid.stop()
+
+    def test_switching_tools_clears_ruler_overlay(self):
+        dm_screen = DMScreen(LayerManager())
+        try:
+            dm_screen.mouse_action_menu.ruler_button.click()
+            dm_screen.display_widget.set_ruler((0.2, 0.2), (0.8, 0.8), 3, "cells")
+            self.assertIsNotNone(
+                dm_screen.display_widget._ruler_start_position
+            )
+            dm_screen.mouse_action_menu.pan_button.click()
+            self.assertIsNone(dm_screen.display_widget._ruler_start_position)
+            self.assertIsNone(dm_screen.display_widget._ruler_end_position)
         finally:
             dm_screen.close()
             QApplication.processEvents()

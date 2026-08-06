@@ -46,6 +46,15 @@ class LayerManager:
             connected_media.stop()
         self.on_update()
 
+    def replace_layers(self, layers: list[Layer]):
+        for layer in self.layers:
+            media = self._connected_media.pop(id(layer), None)
+            if media is not None:
+                media.frame_changed.disconnect(self.on_media_update)
+                media.stop()
+        self.layers = list(layers)
+        self.on_update()
+
     def subscribe_to_updates(self, callback: callable):
         self.notify_update_callbacks.append(callback)
 

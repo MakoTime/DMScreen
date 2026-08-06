@@ -1,4 +1,5 @@
 from threading import Lock
+from math import hypot
 from time import perf_counter
 
 import numpy as np
@@ -9,8 +10,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QSizePolicy,
 )
-from PySide6.QtCore import QObject, QPoint, QRect, QSize, QThread, QTimer, Qt, Signal, Slot
-from PySide6.QtGui import QColor, QImage, QPainter, QPixmap, QPen
+from PySide6.QtCore import QObject, QPoint, QPointF, QRect, QSize, QThread, QTimer, Qt, Signal, Slot
+from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPixmap, QPen, QPolygonF
 from layer_manager import Layer, LayerManager
 from layer_media import AnimationMedia, MaskMedia
 from mouse_action import MouseActionMenu, MouseActionState
@@ -445,6 +446,8 @@ class AspectRatioLabel(QLabel):
     mask_stroke = Signal(object)
     mask_stroke_finished = Signal()
     ping_requested = Signal(object)
+    ruler_changed = Signal(object, object)
+    shape_changed = Signal(object, object)
 
     def __init__(self, performance=None, parent=None):
         super().__init__(parent)
@@ -471,6 +474,14 @@ class AspectRatioLabel(QLabel):
         self._ping_timer = QTimer(self)
         self._ping_timer.setInterval(16)
         self._ping_timer.timeout.connect(self._advance_ping)
+        self._ruler_start = None
+        self._ruler_start_position = None
+        self._ruler_end_position = None
+        self._ruler_distance = None
+        self._ruler_unit = "px"
+        self._shape_start = None
+        self._shape_polygon = None
+        self._shape_cells = []
         self.last_pixmap_update_ms = 0.0
         self.performance = performance or PerformanceChecker()
         self.setMouseTracking(True)
@@ -489,9 +500,13 @@ class AspectRatioLabel(QLabel):
 
     def set_mouse_action_state(self, state):
         self.mouse_action_state = state
+        if state is not MouseActionState.RULER:
+            self.clear_ruler()
+        if state is not MouseActionState.SHAPE:
+            self.clear_shape()
         if state in (MouseActionState.PAN, MouseActionState.PLAYER_PAN):
             self.setCursor(Qt.CursorShape.OpenHandCursor)
-        elif state is MouseActionState.PING:
+        elif state in (MouseActionState.PING, MouseActionState.RULER):
             self.setCursor(Qt.CursorShape.CrossCursor)
         elif state in (
             MouseActionState.MASK,
@@ -576,6 +591,22 @@ class AspectRatioLabel(QLabel):
             event.accept()
             return
         if (
+            self.mouse_action_state is MouseActionState.RULER
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            self._ruler_start = event.position().toPoint()
+            self.ruler_changed.emit(self._ruler_start, self._ruler_start)
+            event.accept()
+            return
+        if (
+            self.mouse_action_state is MouseActionState.SHAPE
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            self._shape_start = event.position().toPoint()
+            self.shape_changed.emit(self._shape_start, self._shape_start)
+            event.accept()
+            return
+        if (
             self.mouse_action_state
             in (
                 MouseActionState.MASK,
@@ -617,6 +648,16 @@ class AspectRatioLabel(QLabel):
             self.mask_stroke.emit(event.position().toPoint())
             event.accept()
             return
+        if self._ruler_start is not None:
+            current = event.position().toPoint()
+            self.ruler_changed.emit(self._ruler_start, current)
+            event.accept()
+            return
+        if self._shape_start is not None:
+            current = event.position().toPoint()
+            self.shape_changed.emit(self._shape_start, current)
+            event.accept()
+            return
         if self._highlight_pan_start is not None:
             current = event.position().toPoint()
             self.highlight_pan_delta.emit(
@@ -645,6 +686,22 @@ class AspectRatioLabel(QLabel):
             self._mask_stroke_active = False
             self.mask_stroke_finished.emit()
             self.setCursor(Qt.CursorShape.CrossCursor)
+            event.accept()
+            return
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self._ruler_start is not None
+        ):
+            self.ruler_changed.emit(self._ruler_start, event.position().toPoint())
+            self._ruler_start = None
+            event.accept()
+            return
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self._shape_start is not None
+        ):
+            self.shape_changed.emit(self._shape_start, event.position().toPoint())
+            self._shape_start = None
             event.accept()
             return
         if (
@@ -696,6 +753,31 @@ class AspectRatioLabel(QLabel):
         self._ping_timer.start()
         self.update()
 
+    def set_ruler(self, start, end, distance, unit="px"):
+        self._ruler_start_position = (float(start[0]), float(start[1]))
+        self._ruler_end_position = (float(end[0]), float(end[1]))
+        self._ruler_distance = float(distance)
+        self._ruler_unit = unit
+        self.update()
+
+    def clear_ruler(self):
+        self._ruler_start_position = None
+        self._ruler_end_position = None
+        self._ruler_distance = None
+        self.update()
+
+    def set_shape(self, polygon, cells):
+        self._shape_polygon = [
+            (float(point[0]), float(point[1])) for point in polygon
+        ]
+        self._shape_cells = [tuple(float(value) for value in cell) for cell in cells]
+        self.update()
+
+    def clear_shape(self):
+        self._shape_polygon = None
+        self._shape_cells = []
+        self.update()
+
     def _advance_ping(self):
         if (
             self._ping_started is None
@@ -743,6 +825,8 @@ class AspectRatioLabel(QLabel):
         painter = QPainter(self)
         painter.drawPixmap(pixmap_rect, pixmap)
         self._draw_ping(painter, pixmap_rect)
+        self._draw_ruler(painter, pixmap_rect)
+        self._draw_shape(painter, pixmap_rect)
         if self.highlight_rect is None:
             self._draw_mask_brush(painter, pixmap_rect)
             painter.end()
@@ -785,6 +869,64 @@ class AspectRatioLabel(QLabel):
                 QPen(color, max(2, round(3 * (1.0 - wave_progress))))
             )
             painter.drawEllipse(center, radius, radius)
+
+    def _draw_ruler(self, painter, display_rect):
+        if self._ruler_start_position is None or self._ruler_end_position is None:
+            return
+        painter.save()
+        start = QPoint(
+            display_rect.left() + round(display_rect.width() * self._ruler_start_position[0]),
+            display_rect.top() + round(display_rect.height() * self._ruler_start_position[1]),
+        )
+        end = QPoint(
+            display_rect.left() + round(display_rect.width() * self._ruler_end_position[0]),
+            display_rect.top() + round(display_rect.height() * self._ruler_end_position[1]),
+        )
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor("#7bdff2"), 3))
+        painter.drawLine(start, end)
+        painter.drawEllipse(start, 5, 5)
+        painter.drawEllipse(end, 5, 5)
+        label = f"{self._ruler_distance:.0f} {self._ruler_unit}"
+        midpoint = (start + end) / 2
+        painter.setPen(QPen(QColor("#ffffff"), 1))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawText(midpoint + QPoint(8, -8), label)
+        painter.restore()
+
+    def _draw_shape(self, painter, display_rect):
+        if not self._shape_polygon:
+            return
+        painter.save()
+        painter.setPen(QPen(QColor("#ff9f1c"), 3))
+        painter.setBrush(
+            Qt.BrushStyle.NoBrush if len(self._shape_polygon) == 2
+            else QColor(255, 159, 28, 48)
+        )
+        polygon = QPolygonF(
+            [
+                QPointF(
+                    display_rect.left() + display_rect.width() * point[0],
+                    display_rect.top() + display_rect.height() * point[1],
+                )
+                for point in self._shape_polygon
+            ]
+        )
+        if len(polygon) == 2:
+            painter.drawLine(polygon[0], polygon[1])
+        else:
+            painter.drawPolygon(polygon)
+        painter.setPen(QPen(QColor(255, 209, 102, 180), 1))
+        painter.setBrush(QColor(255, 209, 102, 64))
+        for cell in self._shape_cells:
+            rect = QRect(
+                display_rect.left() + round(display_rect.width() * cell[0]),
+                display_rect.top() + round(display_rect.height() * cell[1]),
+                round(display_rect.width() * cell[2]),
+                round(display_rect.height() * cell[3]),
+            )
+            painter.drawRect(rect)
+        painter.restore()
 
     def _draw_mask_brush(self, painter, display_rect):
         if (

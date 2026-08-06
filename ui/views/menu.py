@@ -61,6 +61,9 @@ class MenuBar(QMenuBar):
     """Application menu bar for DM-window actions."""
 
     frame_changed = Signal()
+    save_requested = Signal()
+    open_requested = Signal()
+    new_requested = Signal()
 
     def __init__(
         self,
@@ -100,6 +103,10 @@ class MenuBar(QMenuBar):
         self.close_player_action.triggered.connect(
             self.player_handler.close_player
         )
+        self.save_action.triggered.connect(self.save_requested.emit)
+        self.save_as_action.triggered.connect(self.save_requested.emit)
+        self.open_action.triggered.connect(self.open_requested.emit)
+        self.new_action.triggered.connect(self.new_requested.emit)
         self.player_menu.addAction(self.show_player_action)
         self.player_menu.addAction(self.close_player_action)
 

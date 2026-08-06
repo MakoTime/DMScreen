@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QMainWindow
+from PySide6.QtWidgets import QFileDialog, QMainWindow
 from constants import ScreenType
 from dm_screen import DMScreen
 from layer_manager import LayerManager
@@ -7,6 +7,7 @@ from player_handler import PlayerHandler
 from player_controls import PlayerControlsPanel
 from player_screen import PlayerScreen
 from zoom_handler import ZoomHandler
+from project_io import load_project, save_project
 
 
 class DMController:
@@ -54,6 +55,9 @@ class DMController:
             self.dm_window,
         )
         self.menu_bar.frame_changed.connect(self.dm_screen.sync_frame_settings)
+        self.menu_bar.save_requested.connect(self.save_project)
+        self.menu_bar.open_requested.connect(self.open_project)
+        self.menu_bar.new_requested.connect(self.new_project)
         self.dm_screen.frame_changed.connect(
             lambda: self.player_screen.sync_frame_settings_from(
                 self.dm_screen.frame
@@ -72,6 +76,41 @@ class DMController:
     def start(self):
         self.dm_window.showMaximized()
         self.menu_bar.sync_window_modes()
+
+    def save_project(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self.dm_window,
+            "Save DMScreen Project",
+            "",
+            "DMScreen Project (*.dms)",
+        )
+        if path:
+            save_project(path, self.dm_screen.frame, self.layer_manager)
+
+    def open_project(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self.dm_window,
+            "Open DMScreen Project",
+            "",
+            "DMScreen Project (*.dms)",
+        )
+        if not path:
+            return
+        frame, layers = load_project(path)
+        self.dm_screen.frame.set_size(frame["width"], frame["height"])
+        self.dm_screen.frame.set_background_color(frame["background"])
+        self.layer_manager.replace_layers(layers)
+        self.dm_screen.sync_frame_settings()
+        self.player_screen.sync_frame_settings_from(self.dm_screen.frame)
+
+    def new_project(self):
+        self.dm_screen.frame.set_size(1920, 1080)
+        self.dm_screen.frame.set_background_color("black")
+        self.dm_screen.reset_project_overlays()
+        self.layer_manager.replace_layers([])
+        self.dm_screen.create_default_layers()
+        self.dm_screen.sync_frame_settings()
+        self.player_screen.sync_frame_settings_from(self.dm_screen.frame)
 
     def show_player_screen(self):
         self.player_handler.show_player()

@@ -4,6 +4,7 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
+    QComboBox,
     QPushButton,
     QSizePolicy,
     QSpinBox,
@@ -15,6 +16,8 @@ class MouseActionState(Enum):
     PAN = auto()
     PLAYER_PAN = auto()
     PING = auto()
+    RULER = auto()
+    SHAPE = auto()
     MASK = auto()
     MASK_FILL_ADD = auto()
     MASK_FILL_REMOVE = auto()
@@ -43,6 +46,12 @@ class MouseActionMenu(QFrame):
         self.select_button = self._make_button("Select")
         self.pan_button = self._make_button("Pan")
         self.ping_button = self._make_button("Ping")
+        self.ruler_button = self._make_button("Ruler")
+        self.shape_button = self._make_button("Shape")
+        self.shape_select = QComboBox()
+        self.shape_select.addItems(("Cone", "Line", "Circle", "Square"))
+        self.shape_select.setCurrentIndex(0)
+        self.shape_select.setVisible(False)
         self.select_button.setChecked(True)
 
         layout = QHBoxLayout(self)
@@ -51,6 +60,9 @@ class MouseActionMenu(QFrame):
         layout.addWidget(self.select_button)
         layout.addWidget(self.pan_button)
         layout.addWidget(self.ping_button)
+        layout.addWidget(self.ruler_button)
+        layout.addWidget(self.shape_button)
+        layout.addWidget(self.shape_select)
 
         self.select_button.clicked.connect(
             lambda: self._set_state(MouseActionState.SELECT)
@@ -60,6 +72,12 @@ class MouseActionMenu(QFrame):
         )
         self.ping_button.clicked.connect(
             lambda: self._set_state(MouseActionState.PING)
+        )
+        self.ruler_button.clicked.connect(
+            lambda: self._set_state(MouseActionState.RULER)
+        )
+        self.shape_button.clicked.connect(
+            lambda: self._set_state(MouseActionState.SHAPE)
         )
         self._set_state(MouseActionState.SELECT)
 
@@ -173,6 +191,9 @@ class MouseActionMenu(QFrame):
         self.select_button.setChecked(state is MouseActionState.SELECT)
         self.pan_button.setChecked(state is MouseActionState.PAN)
         self.ping_button.setChecked(state is MouseActionState.PING)
+        self.ruler_button.setChecked(state is MouseActionState.RULER)
+        self.shape_button.setChecked(state is MouseActionState.SHAPE)
+        self.shape_select.setVisible(state is MouseActionState.SHAPE)
         if self.player_pan_button is not None:
             self.player_pan_button.setChecked(
                 state is MouseActionState.PLAYER_PAN
